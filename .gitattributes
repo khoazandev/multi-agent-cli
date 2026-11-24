@@ -1,0 +1,3 @@
+/install.sh text eol=lf
+/scripts/agy-herdr-projects.py text eol=lf
+"/Open Workbench.cmd" text eol=crlf

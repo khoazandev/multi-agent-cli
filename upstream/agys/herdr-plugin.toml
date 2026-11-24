@@ -1,0 +1,57 @@
+id = "quaywin.agys"
+name = "Antigravity Switcher"
+version = "0.2.0"
+min_herdr_version = "0.7.0"
+description = "Multi-profile ecosystem switcher & real-time quota tracking for Antigravity"
+platforms = ["macos", "linux", "windows"]
+
+[[build]]
+command = ["sh", "-c", "export PATH=\"$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH\"; command -v agys >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/quaywin/agys/main/install.sh | bash; agys herdr configure || true"]
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["sh", "-c", "export PATH=\"$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH\"; agys herdr configure"]
+
+[[panes]]
+id = "quota"
+title = "Antigravity Quota"
+placement = "popup"
+width = "85%"
+height = 22
+command = ["sh", "-c", "export PATH=\"$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH\"; agys quota; printf '\\n\\033[90mPress [Enter] to close...\\033[0m'; read -r _"]
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "quota"
+title = "Check Quota Dashboard"
+contexts = ["workspace", "pane"]
+command = ["herdr", "plugin", "pane", "open", "--plugin", "quaywin.agys", "--entrypoint", "quota"]
+
+[[actions]]
+id = "configure"
+title = "Configure Clean 3-Row Sidebar"
+command = ["agys", "herdr", "configure"]
+
+[[actions]]
+id = "uninstall"
+title = "Restore Default Sidebar"
+contexts = ["workspace"]
+command = ["agys", "herdr", "uninstall"]
+
+[[actions]]
+id = "run-auto"
+title = "Launch Best Profile (Auto)"
+contexts = ["workspace"]
+command = ["herdr", "pane", "split", "--", "agys", "run", "auto"]
+
+[[actions]]
+id = "commit"
+title = "AI Staged Commit"
+contexts = ["workspace", "pane"]
+command = ["agys", "commit"]
+
+[[events]]
+id = "agys-pane-focused"
+on = "pane.focused"
+command = ["agys", "herdr-hook", "quota"]
+

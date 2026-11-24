@@ -1,0 +1,188 @@
+package profile
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestApplyAndUninstallHerdr2RowConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.toml")
+	t.Setenv("HERDR_CONFIG_PATH", configPath)
+	t.Setenv("HERDR_CONFIG_FILE", configPath)
+
+	// 1. Initial status on missing file
+	if IsHerdrConfiguredForAgys(configPath) {
+		t.Errorf("expected IsHerdrConfiguredForAgys to be false for non-existent config")
+	}
+
+	// 2. Apply on empty / new file
+	if err := ApplyHerdr2RowConfig(configPath); err != nil {
+		t.Fatalf("ApplyHerdr2RowConfig failed: %v", err)
+	}
+
+	if !IsHerdrConfiguredForAgys(configPath) {
+		t.Errorf("expected IsHerdrConfiguredForAgys to be true after apply")
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "[ui.sidebar.agents]") || !strings.Contains(content, "$conversation_title") || !strings.Contains(content, "$quota_5h_normal") {
+		t.Errorf("expected config to contain sidebar section with $conversation_title and $quota_5h_normal, got:\n%s", content)
+	}
+
+	// 3. Apply on existing config with other tables
+	existingContent := `[keys]
+key = "prefix+shift+r"
+
+[ui.sidebar.agents]
+rows = [["state_icon", "agent"]]
+
+[panes]
+id = "test"
+`
+	_ = os.WriteFile(configPath, []byte(existingContent), 0644)
+	if err := ApplyHerdr2RowConfig(configPath); err != nil {
+		t.Fatalf("ApplyHerdr2RowConfig on existing config failed: %v", err)
+	}
+
+	data2, _ := os.ReadFile(configPath)
+	content2 := string(data2)
+	if !strings.Contains(content2, "[keys]") || !strings.Contains(content2, "[panes]") {
+		t.Errorf("expected config to preserve other sections, got:\n%s", content2)
+	}
+	if !strings.Contains(content2, "$conversation_title") || !strings.Contains(content2, "$quota_5h_normal") {
+		t.Errorf("expected updated sidebar to contain $conversation_title and $quota_5h_normal, got:\n%s", content2)
+	}
+
+	// 4. Uninstall
+	if err := UninstallHerdr2RowConfig(configPath); err != nil {
+		t.Fatalf("UninstallHerdr2RowConfig failed: %v", err)
+	}
+
+	data3, _ := os.ReadFile(configPath)
+	content3 := string(data3)
+	if strings.Contains(content3, "$quota_5h_normal") {
+		t.Errorf("expected $quota_5h_normal to be removed after uninstall, got:\n%s", content3)
+	}
+
+	// 5. Test varied formats (spaces in subsequent header, comments, indentations)
+	variedConfig := `[keys]
+key = "prefix+shift+r"
+
+  [ui.sidebar.agents] # indented header with comment
+rows = [["state_icon", "agent"]]
+
+[ server ] # spaced header with comment
+host = "127.0.0.1"
+
+[[ panes.list ]]
+id = "p1"
+`
+	_ = os.WriteFile(configPath, []byte(variedConfig), 0644)
+	if err := ApplyHerdr2RowConfig(configPath); err != nil {
+		t.Fatalf("ApplyHerdr2RowConfig failed on varied config: %v", err)
+	}
+
+	dataVaried, _ := os.ReadFile(configPath)
+	contentVaried := string(dataVaried)
+	if !strings.Contains(contentVaried, "[keys]") {
+		t.Errorf("expected [keys] preserved, got:\n%s", contentVaried)
+	}
+	if !strings.Contains(contentVaried, "[ server ] # spaced header with comment") {
+		t.Errorf("expected subsequent [ server ] preserved without truncation, got:\n%s", contentVaried)
+	}
+	if !strings.Contains(contentVaried, "[[ panes.list ]]") {
+		t.Errorf("expected [[ panes.list ]] preserved without truncation, got:\n%s", contentVaried)
+	}
+	if !strings.Contains(contentVaried, "$conversation_title") {
+		t.Errorf("expected $conversation_title injected, got:\n%s", contentVaried)
+	}
+}
+
+func TestIsTOMLTableHeader(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"[ui.sidebar.agents]", true},
+		{"[server]", true},
+		{"[ server ]", true},
+		{"[ server . logging ]", true},
+		{"[server] # trailing comment", true},
+		{"[[panes.list]]", true},
+		{"[[ panes ]]", true},
+		{"[[panes.list]] # comment", true},
+		{"rows = [", false},
+		{`  ["state_icon", "workspace"],`, false},
+		{`  ["state_icon"]`, false},
+		{`  { token = "$conversation_title" }`, false},
+		{"key = \"value\"", false},
+		{"", false},
+		{"   ", false},
+		{"# just a comment", false},
+	}
+
+	for _, tt := range tests {
+		if got := isTOMLTableHeader(tt.input); got != tt.expected {
+			t.Errorf("isTOMLTableHeader(%q) = %v; want %v", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestEnsureHerdrAgentDetectionManifest(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	configPath := filepath.Join(tempHome, ".config", "herdr", "config.toml")
+	t.Setenv("HERDR_CONFIG_PATH", configPath)
+	t.Setenv("HERDR_CONFIG_FILE", configPath)
+
+	targetDir := filepath.Join(tempHome, ".config", "herdr", "agent-detection")
+	_ = os.MkdirAll(targetDir, 0755)
+	manifestPath := filepath.Join(targetDir, "agy.toml")
+
+	// 1. Populate with legacy buggy manifest containing prompt_box_idle
+	if err := os.WriteFile(manifestPath, []byte(LegacyAgysAgentDetectionTOML), 0644); err != nil {
+		t.Fatalf("failed to seed legacy manifest: %v", err)
+	}
+
+	// 2. EnsureHerdrAgentDetectionManifest should clean it up to restore native upstream manifest
+	err := EnsureHerdrAgentDetectionManifest()
+	if err != nil {
+		t.Fatalf("EnsureHerdrAgentDetectionManifest failed: %v", err)
+	}
+
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Errorf("expected legacy manifest with prompt_box_idle to be removed, but it still exists")
+	}
+
+	// 3. Calling again when absent should succeed cleanly without re-creating it
+	if err := EnsureHerdrAgentDetectionManifest(); err != nil {
+		t.Fatalf("subsequent EnsureHerdrAgentDetectionManifest call failed: %v", err)
+	}
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Errorf("manifest should not be re-created")
+	}
+
+	// 4. Custom user manifest without prompt_box_idle should be preserved
+	customContent := `id = "agy"` + "\n" + `version = "2026.11.01.1"`
+	if err := os.WriteFile(manifestPath, []byte(customContent), 0644); err != nil {
+		t.Fatalf("failed to write custom manifest: %v", err)
+	}
+	if err := CleanStaleHerdrAgentDetectionManifest(); err != nil {
+		t.Fatalf("CleanStaleHerdrAgentDetectionManifest failed on custom manifest: %v", err)
+	}
+	customRead, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("custom manifest was unexpectedly deleted: %v", err)
+	}
+	if string(customRead) != customContent {
+		t.Errorf("custom manifest content changed: %s", string(customRead))
+	}
+}
+
