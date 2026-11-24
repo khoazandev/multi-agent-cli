@@ -1,4 +1,4 @@
-# Antigravity Herdr Workbench
+# Multi Agent CLI
 
 Run several Google Antigravity CLI sessions side by side. Each project gets its own working directory, `agys` account profile, conversation history, and brain directory. Herdr shows up to four projects per tab in one persistent terminal window. Profiles can read skills from a shared directory.
 
@@ -7,8 +7,8 @@ Run several Google Antigravity CLI sessions side by side. Each project gets its 
 Use Ubuntu on x86_64 with `curl`, `git`, `python3`, `sha256sum`, and `tar`. For the Windows launcher, install Windows Terminal and use an Ubuntu distro named `Ubuntu`.
 
 ```bash
-git clone https://github.com/khoazandev/antigravity-herdr-workbench.git
-cd antigravity-herdr-workbench
+git clone https://github.com/khoazandev/multi-agent-cli.git
+cd multi-agent-cli
 bash install.sh
 ```
 
