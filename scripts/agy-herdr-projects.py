@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import fcntl
 import hashlib
 import json
@@ -25,10 +25,20 @@ shared_skills = linux_home / ".local" / "share" / "agy-shared" / "skills"
 legacy_session = "agy-projects"
 workspace_label = "Antigravity Projects"
 starter_label = "[Multi Agent CLI] Setup"
+manager_label = "Accounts & Projects"
 panes_per_tab = 4
 identifier = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}")
 marker = re.compile(r" \[project:([a-zA-Z0-9_-]+)\]$")
 conversation_id = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}")
+credential_paths = (
+    ".gemini/antigravity-cli/antigravity-oauth-token",
+    ".gemini/antigravity/antigravity-oauth-token",
+    ".gemini/jetski-standalone-oauth-token",
+    ".gemini/antigravity-cli/jetski-standalone-oauth-token",
+    ".gemini/antigravity/jetski-standalone-oauth-token",
+    ".gemini/antigravity-ide/antigravity-oauth-token",
+    ".gemini/oauth_creds.json",
+)
 
 
 @dataclass(frozen=True)
@@ -37,10 +47,14 @@ class Project:
     name: str
     repo: Path
     profiles: tuple[str, ...]
+    profile_slots: dict[str, str] = field(default_factory=dict)
 
     @property
     def profile(self):
         return self.profiles[0]
+
+    def runtime_profile(self, account):
+        return self.profile_slots.get(account, account)
 
     @property
     def pane_label(self):
@@ -81,7 +95,8 @@ def load_projects(initial_count=None):
                 if not isinstance(item["profiles"], list):
                     raise ValueError("expected a list of profiles")
                 projects.append(Project(item["id"], item["name"],
-                                        Path(item["repo"]).expanduser(), tuple(item["profiles"])))
+                                        Path(item["repo"]).expanduser(), tuple(item["profiles"]),
+                                        item.get("profile_slots", {})))
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"Cannot read {manifest}: {error}") from error
         validate_projects(projects)
@@ -96,7 +111,7 @@ def load_projects(initial_count=None):
 
 
 def validate_projects(projects):
-    ids, repos, profiles = set(), set(), set()
+    ids, repos, slots = set(), set(), set()
     for project in projects:
         if not isinstance(project.id, str) or not identifier.fullmatch(project.id):
             raise ValueError(f"Invalid project ID: {project.id!r}")
@@ -111,12 +126,32 @@ def validate_projects(projects):
         repos.add(repo)
         if not project.profiles:
             raise ValueError(f"Project {project.id} needs a profile")
-        for profile in project.profiles:
-            if not isinstance(profile, str) or not identifier.fullmatch(profile) or profile.lower() == "auto":
-                raise ValueError(f"Invalid profile for {project.id}: {profile!r}")
-            if profile in profiles:
-                raise ValueError(f"The profile {profile!r} is already assigned")
-            profiles.add(profile)
+        if not isinstance(project.profile_slots, dict):
+            raise ValueError(f"Invalid account storage for {project.id}")
+        accounts = set()
+        for account in project.profiles:
+            if not isinstance(account, str) or not identifier.fullmatch(account) or account.lower() == "auto":
+                raise ValueError(f"Invalid account for {project.id}: {account!r}")
+            slot = project.runtime_profile(account)
+            if (account in accounts or not isinstance(slot, str)
+                    or not identifier.fullmatch(slot) or slot.lower() == "auto" or slot in slots):
+                raise ValueError(f"Duplicate or invalid profile storage for {project.id}: {account}")
+            accounts.add(account)
+            slots.add(slot)
+        if project.profile_slots.keys() - accounts:
+            raise ValueError(f"Unexpected account storage for {project.id}")
+
+
+def assign_account_slots(project, projects):
+    slots = dict(project.profile_slots)
+    used = {account for item in projects if item.id != project.id for account in item.profiles}
+    for account in project.profiles:
+        if account in used and account not in slots:
+            if any(item.id == project.id and account in item.profiles for item in projects):
+                continue  # Preserve a first project's existing profile and history.
+            digest = hashlib.sha256(f"{project.id}\0{account}".encode()).hexdigest()[:24]
+            slots[account] = f"mac-{digest}"
+    return replace(project, profile_slots=slots)
 
 
 def save_projects(projects):
@@ -147,7 +182,8 @@ def prepare_projects(projects, root):
     shared_skills.mkdir(parents=True, exist_ok=True)
     for project in projects:
         project.repo.mkdir(parents=True, exist_ok=True)
-        for profile in project.profiles:
+        for account in project.profiles:
+            profile = project.runtime_profile(account)
             profile_dir = root / "profiles" / profile
             profile_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             manifest = profile_dir / ".gemini" / "config" / "skills.json"
@@ -164,6 +200,47 @@ def prepare_projects(projects, root):
             if not any(isinstance(entry, dict) and entry.get("path") == str(shared_skills) for entry in entries):
                 entries.append({"path": str(shared_skills)})
                 write_json(manifest, content)
+
+
+def saved_google_login(path):
+    # Only read an Antigravity credential file, and skip links or bad files.
+    if not path.is_file() or path.resolve() != path:
+        return None
+    try:
+        with path.open("rb") as source:
+            content = source.read(65537)
+        if len(content) > 65536:
+            return None
+        login = json.loads(content)
+        refresh = login["token"]["refresh_token"]
+        return login if isinstance(refresh, str) and refresh else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def reuse_account_login(project, account, projects, root):
+    """Seed only the OAuth credential for a new slot using the same account alias."""
+    profiles = root.resolve() / "profiles"
+    target = profiles / project.runtime_profile(account)
+    for path in credential_paths:
+        existing = target / path
+        if existing.exists() or existing.is_symlink():
+            return False
+    primary_credential = credential_paths[0]
+    destination = target / primary_credential
+    if destination.resolve() != destination:
+        return False
+    peers = [item for item in projects if item.id != project.id and account in item.profiles]
+    peers.sort(key=lambda item: item.runtime_profile(account) != account)
+    for peer in peers:
+        source = profiles / peer.runtime_profile(account)
+        for path in credential_paths:
+            login = saved_google_login(source / path)
+            if login is not None:
+                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                write_json(destination, login)
+                return True
+    return False
 
 
 def match_panes(projects, panes, bindings):
@@ -272,7 +349,7 @@ def session_file(project, profile):
 
 
 def pane_command(project, fresh):
-    command = [str(bin_dir / "agy-herdr-projects"), "run", project.profile]
+    command = [str(bin_dir / "agy-herdr-projects"), "run", project.runtime_profile(project.profile)]
     if not fresh:
         try:
             latest = session_file(project, project.profile).read_text(encoding="utf-8").strip()
@@ -326,19 +403,22 @@ def sync_panes(env, projects, starting, fresh):
 
 def run_profile(profile, args):
     projects = load_projects()
-    project = next((item for item in projects if profile in item.profiles), None)
-    if project is None:
+    match = next(((item, account) for item in projects for account in item.profiles
+                  if item.runtime_profile(account) == profile), None)
+    if match is None:
         raise ValueError(f"Profile {profile!r} is not assigned to any project")
+    project, account = match
     if not os.environ.get("MULTI_AGENT_CLI_SESSION") and legacy_running():
         raise RuntimeError("The legacy Herdr session is still running. Stop it after saving your work before using the new launcher.")
     env = dict(os.environ)
     for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"):
         env.pop(name, None)
-    latest = session_file(project, profile)
+    latest = session_file(project, account)
     latest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    profile_root = accounts_root()
     env.update({
         "PATH": os.pathsep.join([str(bin_dir), env.get("PATH", os.defpath)]),
-        "AGYS_DIR": str(accounts_root()),
+        "AGYS_DIR": str(profile_root),
         "AGYS_REAL_HOME": str(linux_home),
         "AGYS_NO_AUTO_UPDATE": "1",
         "MULTI_AGENT_CLI": "1",
@@ -358,6 +438,7 @@ def run_profile(profile, args):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise RuntimeError(f"Project {project.id!r} is already running in the workbench") from error
+        reuse_account_login(project, account, projects, profile_root)
         os.set_inheritable(lock.fileno(), True)
         os.execve(executable, [executable, "run", profile, "--", *args], env)
 
@@ -375,7 +456,84 @@ def choose_count(current):
         print(f"Enter a whole number of at least {current}.")
 
 
+def open_manager(env, workspace_id):
+    tabs = herdr(env, "tab", "list", "--workspace", workspace_id)["tabs"]
+    possible_tabs = {tab["tab_id"] for tab in tabs if tab.get("label") == manager_label}
+    panes = herdr(env, "pane", "list", "--workspace", workspace_id)["panes"]
+    existing = next((pane for pane in panes if pane.get("label") == manager_label
+                     and pane["tab_id"] in possible_tabs), None)
+    saved = state_dir / "manager-terminal.json"
+    if existing and saved.exists():
+        try:
+            if json.loads(saved.read_text(encoding="utf-8")) == existing["terminal_id"]:
+                return existing["tab_id"]
+        except ValueError:
+            pass
+    result = create_project_tab(env["HERDR_SOCKET_PATH"], workspace_id, manager_label, [{
+        "repo": linux_home,
+        "label": manager_label,
+        "command": [str(bin_dir / "agy-herdr-projects"), "manage"],
+    }])
+    if existing:
+        herdr(env, "pane", "close", existing["pane_id"])
+    tab_id = result["layout"]["tab_id"]
+    panes = herdr(env, "pane", "list", "--workspace", workspace_id)["panes"]
+    pane = next((pane for pane in panes if pane["tab_id"] == tab_id and pane.get("label") == manager_label), None)
+    if pane is None:
+        raise RuntimeError("The accounts and projects pane did not start")
+    write_json(saved, pane["terminal_id"])
+    return tab_id
+
+
+def manage_projects():
+    launcher = str(bin_dir / "agy-herdr-projects")
+    env = server_environment()
+    while True:
+        projects = load_projects()
+        print("\nMulti Agent CLI · Tài khoản và dự án")
+        for account in sorted({account for project in projects for account in project.profiles}):
+            print(f"\n{account}")
+            for project in projects:
+                if account in project.profiles:
+                    active = " · đang chọn" if project.profile == account else ""
+                    print(f"  {project.id}  {project.name}{active}\n    {project.repo}")
+        print("\n1  Thêm repo    2  Gán tài khoản    3  Đổi tài khoản    4  Mở pane    q  Đóng tab")
+        choice = input("> ").strip().lower()
+        if choice == "q":
+            return
+        if choice == "1":
+            project_id = input("Mã dự án > ").strip()
+            repo = input("Thư mục repo trong WSL > ").strip()
+            account = input("Tài khoản mới hoặc đã có > ").strip()
+            if not all((project_id, repo, account)):
+                continue
+            args = ["--add", project_id, "--repo", repo, "--profile", account]
+        elif choice in ("2", "3"):
+            project_id = input("Mã dự án > ").strip()
+            account = input("Tài khoản > ").strip()
+            args = ["--allow" if choice == "2" else "--use", project_id, account]
+        elif choice == "4":
+            project_id = input("Mã dự án > ").strip()
+            if not any(project.id == project_id for project in projects):
+                print("Không tìm thấy dự án.")
+                continue
+            args = []
+        else:
+            continue
+        # Reuse the normal CLI so the same configuration lock, validation, and pane lifecycle apply.
+        result = subprocess.run([launcher, *args, "--prepare"], check=False)
+        if choice == "4" and result.returncode == 0:
+            workspace_id = find_workspace(env)
+            panes = herdr(env, "pane", "list", "--workspace", workspace_id)["panes"]
+            pane = match_panes(projects, panes, pane_bindings()).get(project_id)
+            if pane:
+                herdr(env, "pane", "focus", pane["pane_id"])
+
+
 def main():
+    if sys.argv[1:2] == ["manage"]:
+        manage_projects()
+        return
     if sys.argv[1:2] == ["run"]:
         if len(sys.argv) < 3:
             raise ValueError("Usage: agy-herdr-projects run PROFILE [-- AGY_ARGS...]")
@@ -387,6 +545,7 @@ def main():
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--count", type=int, help="total projects to prepare")
     action.add_argument("--choose", action="store_true", help="ask for the total number of projects")
+    action.add_argument("--manage", action="store_true", help="open the accounts and projects tab")
     action.add_argument("--add", metavar="ID", help="register a project with --repo and one or more --profile values")
     action.add_argument("--allow", nargs=2, metavar=("ID", "PROFILE"), help="allow another account for an existing project")
     action.add_argument("--use", nargs=2, metavar=("ID", "PROFILE"), help="switch a closed project to a configured account")
@@ -429,15 +588,16 @@ def main():
         if args.add:
             if not (state_dir / "projects.json").exists() and not (state_dir / "project-count").exists():
                 projects = []
-            projects.append(Project(args.add, args.name or args.add, args.repo.expanduser().resolve(), tuple(args.profile)))
+            project = Project(args.add, args.name or args.add, args.repo.expanduser().resolve(), tuple(args.profile))
+            projects.append(assign_account_slots(project, projects))
         if args.allow:
             project_id, profile = args.allow
             project = next((project for project in projects if project.id == project_id), None)
             if project is None:
                 raise ValueError(f"Unknown project {project_id!r}")
             if profile not in project.profiles:
-                projects = [replace(item, profiles=(*item.profiles, profile)) if item.id == project_id else item
-                            for item in projects]
+                updated = assign_account_slots(replace(project, profiles=(*project.profiles, profile)), projects)
+                projects = [updated if item.id == project_id else item for item in projects]
         requested = choose_count(len(projects)) if args.choose else args.count or len(projects)
         number = 1
         ids = {project.id for project in projects}
@@ -470,9 +630,13 @@ def main():
         profiles_root = state_dir / "profiles-root.json"
         if not profiles_root.exists():
             write_json(profiles_root, str(root))
-        workspace_id = sync_panes(env, projects, start_server(env), args.fresh)
+        starting = start_server(env)
+        workspace_id = sync_panes(env, projects, starting, args.fresh)
+        manager_id = open_manager(env, workspace_id) if args.manage else None
         if not args.prepare:
             herdr(env, "workspace", "focus", workspace_id)
+            if manager_id:
+                herdr(env, "tab", "focus", manager_id)
 
     if not args.prepare:
         os.execvpe(herdr_command()[0], herdr_command(), env)

@@ -1,6 +1,6 @@
 # Multi Agent CLI
 
-Run several Google Antigravity CLI sessions side by side. Each project has a working directory, an ID, and a list of allowed account profiles. Each account profile has its own conversation history and brain directory. Herdr shows up to four projects per tab in one terminal window. Profiles can read skills from a shared directory.
+Run several Google Antigravity CLI sessions side by side. The **Accounts & Projects** tab groups repositories by account. The same account can run multiple projects at once. Every project and account pair keeps its own conversation history and brain directory. Herdr shows up to four projects per tab in one terminal window. Profiles can read skills from a shared directory.
 
 ## Install on Ubuntu WSL
 
@@ -23,10 +23,10 @@ Run `git pull --ff-only` and then `bash install.sh`. The installer keeps existin
 Double-click [Open Workbench.cmd](Open%20Workbench.cmd) from Windows, or run this from Ubuntu:
 
 ```bash
-~/.local/bin/agy-herdr-projects --choose
+~/.local/bin/agy-herdr-projects --manage
 ```
 
-- The first launch defaults to three projects. Enter a larger total to add projects, or press Enter to reopen the current layout.
+- The first launch defaults to three projects. Use the **Accounts & Projects** tab to add existing repositories, assign accounts, and open their panes. The `--choose` option still opens the project-count prompt.
 - To start with a different number, run `~/.local/bin/agy-herdr-projects --count 2` on an initial setup.
 - Put each Git checkout in its matching starter directory under `~/projects`, such as `~/projects/agy-a`. Sign in to the intended Google account in each pane.
 - Put shared skills under `~/.local/share/agy-shared/skills/<skill-name>/SKILL.md`. The workbench adds that path to each profile's skills manifest and keeps its other entries.
@@ -34,13 +34,21 @@ Double-click [Open Workbench.cmd](Open%20Workbench.cmd) from Windows, or run thi
 
 ## Register existing repositories and switch accounts
 
+Sign in to Google in the first project's CLI pane. Then add a second repository using the same account name in the manager, or run:
+
+```bash
+agy-herdr-projects --add api --repo ~/src/api --profile acc-a --prepare
+```
+
+This example shares `acc-a` with Project A. When a project opens with the same account and its own profile has no credentials yet, the workbench initializes it using the saved local Antigravity CLI OAuth login. Each project keeps its own brain, settings, and history. If both panes were open at the login prompt before you signed in, close and reopen the second pane from the manager. A session that Google expires or revokes may require signing in again.
+
 ```bash
 agy-herdr-projects --add payments --name Payments --repo ~/src/payments \
   --profile payments-main --profile payments-backup --prepare
 agy-herdr-projects --list
 ```
 
-The first profile is active by default. To add another allowed account to an existing project, run `agy-herdr-projects --allow payments payments-spare --prepare`. To switch, exit the CLI or close the pane for that project, then run `agy-herdr-projects --use payments payments-backup --prepare`. Each account keeps the conversation history it already owns. Choose distinct profile names for each project. Existing entries are stored in `~/.local/state/agy-herdr-projects/projects.json`.
+The first profile is active by default. To add another allowed account to an existing project, run `agy-herdr-projects --allow payments payments-spare --prepare`. To switch, exit the CLI or close the pane for that project, then run `agy-herdr-projects --use payments payments-backup --prepare`. Each project and account pair keeps its conversation history. Use one account name per Google login and reuse it only for projects that should share that login. Existing entries are stored in `~/.local/state/agy-herdr-projects/projects.json`.
 
 The workbench automatically resumes the conversation last reported by its hook for the selected project and account. Workbench resume checks account ownership and the exact repository, and starts new conversations for profiles with no saved pointer. If a saved conversation was deleted or lacks usable metadata, run `agy-herdr-projects --fresh --prepare` to start a new conversation in the missing pane. Use `agy-herdr-projects --stop` after saving your work if you want to stop the upgraded server.
 

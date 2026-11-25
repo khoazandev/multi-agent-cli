@@ -61,11 +61,36 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(result["exclude"], ["old"])
         self.assertEqual(result["entries"], [{"path": "/user/skills"}, {"path": str(self.root / "skills")}])
 
-    def test_profile_cannot_be_assigned_to_two_projects(self):
+    def test_two_projects_share_account_name_with_distinct_profile_storage(self):
         first = workbench.project_for(1)
         second = workbench.Project("other", "Other project", self.root / "another", (first.profile,))
-        with self.assertRaisesRegex(ValueError, "profile.*already"):
-            workbench.validate_projects([first, second])
+        second = workbench.assign_account_slots(second, [first])
+        workbench.validate_projects([first, second])
+        workbench.save_projects([first, second])
+        first, second = workbench.load_projects()
+        self.assertEqual(first.profile, second.profile)
+        self.assertEqual(first.runtime_profile(first.profile), first.profile)
+        self.assertNotEqual(first.runtime_profile(first.profile), second.runtime_profile(second.profile))
+        workbench.prepare_projects([first, second], self.profiles)
+        self.assertTrue((self.profiles / "profiles" / second.runtime_profile(second.profile)).is_dir())
+
+    def test_reuse_copies_only_login_and_never_replaces_existing_credentials(self):
+        source = workbench.project_for(1)
+        target = workbench.assign_account_slots(
+            workbench.Project("other", "Second repo", self.root / "other", (source.profile,)), [source])
+        profiles = self.profiles / "profiles"
+        source_path = profiles / source.profile / workbench.credential_paths[0]
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text('{"token":{"refresh_token":"fixture-value"}}')
+        (source_path.parent / "history.jsonl").write_text("fixture history")
+        destination = profiles / target.runtime_profile(source.profile) / workbench.credential_paths[0]
+        self.assertTrue(workbench.reuse_account_login(target, source.profile, [source, target], self.profiles))
+        self.assertEqual(json.loads(destination.read_text()), json.loads(source_path.read_text()))
+        self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((destination.parent / "history.jsonl").exists())
+        destination.write_text('{"token":{"refresh_token":"own-login"}}')
+        self.assertFalse(workbench.reuse_account_login(target, source.profile, [source, target], self.profiles))
+        self.assertIn("own-login", destination.read_text())
 
 
 if __name__ == "__main__":

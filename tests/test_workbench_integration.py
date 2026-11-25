@@ -138,6 +138,47 @@ class WorkbenchIntegrationTests(unittest.TestCase):
         self.assertEqual([item[:2] for item in launches],
                          [["first", str(directory)], ["second", str(directory)]])
 
+    def test_one_login_launches_two_repositories_and_keeps_their_histories_separate(self):
+        first_repo, second_repo = self.root / "first", self.root / "second"
+        self.launch("--add", "first", "--repo", str(first_repo), "--profile", "shared")
+        self.wait_for_launches(1)
+        profiles = self.root / "account-state" / "profiles"
+        state = Path(".gemini/antigravity-cli")
+        auth = state / "antigravity-oauth-token"
+        source = profiles / "shared"
+        (source / state).mkdir(parents=True)
+        (source / auth).write_text('{"token":{"refresh_token":"fixture"}}')
+        (source / state / "history.jsonl").write_text("first repo only")
+        self.launch("--add", "second", "--repo", str(second_repo), "--profile", "shared")
+        launches = self.wait_for_launches(2)
+        self.assertEqual([entry[1] for entry in launches], [str(first_repo), str(second_repo)])
+        self.assertEqual(launches[0][0], "shared")
+        self.assertNotEqual(launches[1][0], "shared")
+        second = profiles / launches[1][0]
+        self.assertEqual(json.loads((second / auth).read_text()), json.loads((source / auth).read_text()))
+        self.assertFalse((second / state / "history.jsonl").exists())
+
+        self.launch("--manage")
+        self.launch("--manage")
+        workspace = next(item["workspace_id"] for item in self.herdr("workspace", "list")["workspaces"]
+                         if item["label"] == "Antigravity Projects")
+        tabs = self.herdr("tab", "list", "--workspace", workspace)["tabs"]
+        self.assertEqual(sum(tab["label"] == "Accounts & Projects" for tab in tabs), 1)
+        self.assertEqual(len(self.wait_for_launches(2)), 2)
+
+        self.stop()
+        self.launch("--count", "2")
+        self.launch("--manage")
+        workspace = next(item["workspace_id"] for item in self.herdr("workspace", "list")["workspaces"]
+                         if item["label"] == "Antigravity Projects")
+        tabs = self.herdr("tab", "list", "--workspace", workspace)["tabs"]
+        self.assertEqual(sum(tab["label"] == "Accounts & Projects" for tab in tabs), 1)
+        manager = next(tab for tab in tabs if tab["label"] == "Accounts & Projects")
+        panes = self.herdr("pane", "list", "--workspace", workspace)["panes"]
+        pane = next(item for item in panes if item["tab_id"] == manager["tab_id"])
+        recorded = json.loads((self.config_path.parent / "manager-terminal.json").read_text())
+        self.assertEqual(recorded, pane["terminal_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -86,4 +86,4 @@ rmdir -- "$launcher_stage"
 "$library/herdr" --version
 "$library/agys" --version
 agy --version
-printf '\nOpen the workbench with %s/agy-herdr-projects --choose\n' "$bin_dir"
+printf '\nOpen the workbench with %s/agy-herdr-projects --manage\n' "$bin_dir"
