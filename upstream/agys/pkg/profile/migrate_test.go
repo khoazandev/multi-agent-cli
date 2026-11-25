@@ -173,6 +173,37 @@ func TestMigrateConversation_Validation(t *testing.T) {
 	}
 }
 
+func TestMigrationRefusesToOverwriteExistingBrain(t *testing.T) {
+	t.Setenv("AGYS_DIR", t.TempDir())
+	const id = "conversation"
+	for _, name := range []string{"source", "destination"} {
+		dir, err := GetProfileDir(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		brain := filepath.Join(dir, ".gemini", "antigravity-cli", "brain", id)
+		if err := os.MkdirAll(brain, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(brain, "marker"), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := MigrateConversation(id, "source", "destination"); err == nil {
+		t.Error("migration accepted an existing destination brain")
+	}
+	for _, name := range []string{"source", "destination"} {
+		dir, err := GetProfileDir(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(dir, ".gemini", "antigravity-cli", "brain", id, "marker")
+		if data, err := os.ReadFile(marker); err != nil || string(data) != name {
+			t.Errorf("%s marker = %q, %v, want %q", name, data, err, name)
+		}
+	}
+}
+
 func TestFindProfileAndConvByLatestConversation(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)

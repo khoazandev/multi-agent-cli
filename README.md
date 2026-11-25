@@ -1,6 +1,6 @@
 # Multi Agent CLI
 
-Run several Google Antigravity CLI sessions side by side. Each project gets its own working directory, `agys` account profile, conversation history, and brain directory. Herdr shows up to four projects per tab in one persistent terminal window. Profiles can read skills from a shared directory.
+Run several Google Antigravity CLI sessions side by side. Each project has a working directory, an ID, and a list of allowed account profiles. Each account profile has its own conversation history and brain directory. Herdr shows up to four projects per tab in one terminal window. Profiles can read skills from a shared directory.
 
 ## Install on Ubuntu WSL
 
@@ -12,7 +12,11 @@ cd multi-agent-cli
 bash install.sh
 ```
 
-For missing tools, the installer checks the Herdr and `agys` release archives against pinned SHA-256 hashes and obtains `agy` from Google's official installer. Existing binaries and a registered `agys` plugin are reused.
+The installer checks Herdr against a pinned SHA-256 hash and builds the workbench copy of `agys` from source. If needed it downloads a checksum-verified Go toolchain and obtains `agy` from Google's official installer. Workbench binaries are installed under `~/.local/lib/multi-agent-cli`.
+
+## Upgrade an existing workbench
+
+Run `git pull --ff-only` and then `bash install.sh`. The installer keeps existing projects and profile directories. If the original Herdr session is still running, the launcher attaches to it. Save your work and exit its agents before stopping it with `herdr --session agy-projects server stop`. Open the launcher again to start the upgraded session. The new session imports the previous project count, uses its own Herdr configuration, and reuses project and account directories.
 
 ## Open or add projects
 
@@ -23,19 +27,32 @@ Double-click [Open Workbench.cmd](Open%20Workbench.cmd) from Windows, or run thi
 ```
 
 - The first launch defaults to three projects. Enter a larger total to add projects, or press Enter to reopen the current layout.
+- To start with a different number, run `~/.local/bin/agy-herdr-projects --count 2` on an initial setup.
 - Put each Git checkout in its matching starter directory under `~/projects`, such as `~/projects/agy-a`. Sign in to the intended Google account in each pane.
-- Put shared skills under `~/.local/share/agy-shared/skills/<skill-name>/SKILL.md`. Each created profile has a manifest that points here.
-- To add projects to an already open window, run `~/.local/bin/agy-herdr-projects --count 8 --prepare` from a separate Ubuntu shell. Running panes stay in place.
+- Put shared skills under `~/.local/share/agy-shared/skills/<skill-name>/SKILL.md`. The workbench adds that path to each profile's skills manifest and keeps its other entries.
+- To add projects to an already open window, run `~/.local/bin/agy-herdr-projects --count 8 --prepare` from a separate Ubuntu shell. New projects open in new tabs so running panes stay in place.
 
-`agys` stores Google credentials on disk. Profiles in the same Linux user account separate local state. Code with that user's filesystem permissions can still access the other profiles.
+## Register existing repositories and switch accounts
+
+```bash
+agy-herdr-projects --add payments --name Payments --repo ~/src/payments \
+  --profile payments-main --profile payments-backup --prepare
+agy-herdr-projects --list
+```
+
+The first profile is active by default. To add another allowed account to an existing project, run `agy-herdr-projects --allow payments payments-spare --prepare`. To switch, exit the CLI or close the pane for that project, then run `agy-herdr-projects --use payments payments-backup --prepare`. Each account keeps the conversation history it already owns. Choose distinct profile names for each project. Existing entries are stored in `~/.local/state/agy-herdr-projects/projects.json`.
+
+The workbench automatically resumes the conversation last reported by its hook for the selected project and account. Workbench resume checks account ownership and the exact repository, and starts new conversations for profiles with no saved pointer. If a saved conversation was deleted or lacks usable metadata, run `agy-herdr-projects --fresh --prepare` to start a new conversation in the missing pane. Use `agy-herdr-projects --stop` after saving your work if you want to stop the upgraded server.
+
+`agys` stores Google credentials on disk. The workbench keeps new trust changes within each profile and turns off background updates for its copy of `agys`. Trust entries from an earlier installation are preserved for review. Profiles in the same Linux user account separate local state. Code with that user's filesystem permissions can still access the other profiles and edit shared skills.
 
 ## Upstream source and licenses
 
-This independent repository includes exact upstream source snapshots. The launcher runs the two tools as separate executables and uses the Antigravity CLI distributed by Google.
+This independent repository vendors Herdr and a patched copy of `agys`. The launcher runs them as separate executables and uses the Antigravity CLI distributed by Google.
 
 | Component | Snapshot | License |
 | --- | --- | --- |
 | [Herdr](https://github.com/herdrdev/herdr/tree/v0.9.5) | `v0.9.5` (`2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01`) in [`upstream/herdr`](upstream/herdr) | [Apache-2.0](upstream/herdr/LICENSE), plus bundled notices |
-| [`agys`](https://github.com/quaywin/agys/tree/v0.2.40) | `v0.2.40` (`0b7041420839316938e30480575a8c1c91848689`) in [`upstream/agys`](upstream/agys) | [MIT](upstream/agys/LICENSE) |
+| [`agys`](https://github.com/quaywin/agys/tree/v0.2.40) | Based on `v0.2.40` (`0b7041420839316938e30480575a8c1c91848689`), with workbench fixes in [`upstream/agys`](upstream/agys) | [MIT](upstream/agys/LICENSE) |
 
 Workbench scripts and documentation are covered by the root [Apache-2.0 license](LICENSE). Each upstream component keeps its original license and notices.

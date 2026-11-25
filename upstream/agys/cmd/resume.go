@@ -87,7 +87,25 @@ var resumeCmd = &cobra.Command{
 			Limit:   resumeLimit,
 		}
 
-		sessions, err := profile.ListSessions(cmd.Context(), filter)
+		var sessions []profile.ConversationSession
+		var err error
+		if profile.IsWorkbenchMode() {
+			if resumeAll || resumeProject != "" || filterProjectArg != "" {
+				return fmt.Errorf("workbench resumes are scoped to the current project")
+			}
+			if filter.Profile == "" {
+				filter.Profile = os.Getenv("AGYS_PROFILE")
+			}
+			if filter.Profile == "" {
+				return fmt.Errorf("specify the project's account with --profile")
+			}
+			sessions, err = profile.WorkbenchSessions(filter.Profile, cwd)
+			if filter.Limit > 0 && len(sessions) > filter.Limit {
+				sessions = sessions[:filter.Limit]
+			}
+		} else {
+			sessions, err = profile.ListSessions(cmd.Context(), filter)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to list sessions: %w", err)
 		}
@@ -184,6 +202,9 @@ var resumeCmd = &cobra.Command{
 }
 
 func buildResumeAgyArgs(convID string, extraAgyArgs []string) []string {
+	if profile.IsWorkbenchMode() {
+		return append([]string{"--conversation=" + convID}, extraAgyArgs...)
+	}
 	savedFlags, _ := profile.GetSessionFlags(convID)
 
 	args := []string{"--conversation=" + convID}

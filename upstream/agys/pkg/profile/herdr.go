@@ -36,6 +36,11 @@ emit_and_exit() {
 # resume the pane. Lifecycle state comes from Herdr's screen detection.
 [ "${1:-session}" = "session" ] || emit_and_exit
 
+if [ "${MULTI_AGENT_CLI:-}" = "1" ]; then
+  [ -x "${MULTI_AGENT_CLI_AGYS:-}" ] || emit_and_exit
+  exec "$MULTI_AGENT_CLI_AGYS" herdr-hook session
+fi
+
 # Locate real user home if $HOME is pointing to an isolated profile directory
 REAL_HOME="$HOME"
 case "$HOME" in
@@ -272,12 +277,14 @@ func HandleHerdrHook(ctx context.Context, action string, stdin io.Reader) error 
 		}
 	}
 
-	// Auto-ensure Herdr 2-row sidebar config and agent detection manifest are applied
-	configPath := GetHerdrConfigPath()
-	if !IsHerdrConfiguredForAgys(configPath) {
-		_ = ApplyHerdr2RowConfig(configPath)
+	if !IsWorkbenchMode() {
+		// The workbench owns its dedicated Herdr config.
+		configPath := GetHerdrConfigPath()
+		if !IsHerdrConfiguredForAgys(configPath) {
+			_ = ApplyHerdr2RowConfig(configPath)
+		}
+		_ = EnsureHerdrAgentDetectionManifest()
 	}
-	_ = EnsureHerdrAgentDetectionManifest()
 
 	currentProfile, _ := ResolveProfileFromEnv()
 	currentProfile, profileDir := resolveHerdrProfile(ctx, currentProfile, paneID, panes)
@@ -289,6 +296,19 @@ func HandleHerdrHook(ctx context.Context, action string, stdin io.Reader) error 
 			TranscriptPath string `json:"transcriptPath"`
 		}
 		if err := json.NewDecoder(stdin).Decode(&payload); err == nil && payload.ConversationID != "" {
+			if IsWorkbenchMode() {
+				if !validProfileNameRegex.MatchString(payload.ConversationID) || profileDir == "" ||
+					currentProfile != os.Getenv("AGYS_PROFILE") {
+					fmt.Println("{}")
+					return nil
+				}
+				path := os.Getenv("MULTI_AGENT_CLI_SESSION_FILE")
+				if filepath.IsAbs(path) {
+					if err := WriteFileAtomic(path, []byte(payload.ConversationID+"\n"), 0600); err != nil {
+						fmt.Fprintf(os.Stderr, "[agys] Could not save the workbench session: %v\n", err)
+					}
+				}
+			}
 			seq := time.Now().UnixNano()
 			params := map[string]interface{}{
 				"pane_id":          paneID,
@@ -296,6 +316,11 @@ func HandleHerdrHook(ctx context.Context, action string, stdin io.Reader) error 
 				"agent":            "agy",
 				"seq":              seq,
 				"agent_session_id": payload.ConversationID,
+			}
+			if IsWorkbenchMode() {
+				if argv := WorkbenchResumeArgv(currentProfile, payload.ConversationID); argv != nil {
+					params["resume_argv"] = argv
+				}
 			}
 			if payload.TranscriptPath != "" {
 				params["agent_session_path"] = payload.TranscriptPath
@@ -430,15 +455,16 @@ func SyncHerdrIntegration(profileDir string) error {
 		return nil
 	}
 
-	// Auto-ensure Herdr 2-row sidebar config and agent detection manifest are applied
-	configPath := GetHerdrConfigPath()
-	if !IsHerdrConfiguredForAgys(configPath) {
-		_ = ApplyHerdr2RowConfig(configPath)
-	}
-	_ = EnsureHerdrAgentDetectionManifest()
+	if !IsWorkbenchMode() {
+		configPath := GetHerdrConfigPath()
+		if !IsHerdrConfiguredForAgys(configPath) {
+			_ = ApplyHerdr2RowConfig(configPath)
+		}
+		_ = EnsureHerdrAgentDetectionManifest()
 
-	// Remove any shadowed legacy .config/herdr in profileDir to ensure global config is always respected
-	_ = os.RemoveAll(filepath.Join(profileDir, ".config", "herdr"))
+		// Remove only the legacy config used by the upstream integration.
+		_ = os.RemoveAll(filepath.Join(profileDir, ".config", "herdr"))
+	}
 
 	hookDir := filepath.Join(profileDir, ".gemini", "config", "hooks")
 	if err := os.MkdirAll(hookDir, 0700); err != nil {
@@ -463,7 +489,9 @@ func SyncHerdrIntegration(profileDir string) error {
 	}
 
 	// Clean legacy PostInvocation/Stop hooks across all profiles asynchronously in background
-	go CleanStaleHooksInProfiles()
+	if !IsWorkbenchMode() {
+		go CleanStaleHooksInProfiles()
+	}
 
 	// Ensure statusLine hook is configured in settings.json to capture real-time context window
 	return SyncStatusLineSettings(profileDir)
@@ -471,6 +499,9 @@ func SyncHerdrIntegration(profileDir string) error {
 
 // CleanStaleHooksInProfiles scans all known profile directories and cleans legacy PostInvocation/Stop hooks.
 func CleanStaleHooksInProfiles() {
+	if IsWorkbenchMode() {
+		return
+	}
 	profiles, err := List()
 	if err != nil {
 		return
@@ -506,6 +537,9 @@ func ensureHooksJSON(hooksJSONPath, hookScriptPath string) error {
 	}
 
 	sessionCmd := "bash '$HOME/.gemini/config/hooks/herdr-agent-state.sh' session"
+	if IsWorkbenchMode() {
+		sessionCmd = `bash "$HOME/.gemini/config/hooks/herdr-agent-state.sh" session`
+	}
 
 	herdrMap["PreInvocation"] = []interface{}{
 		map[string]interface{}{
@@ -1149,7 +1183,6 @@ func reportHerdrMetadataInternal(ctx context.Context, profileName, modelName str
 			setQuotaTierTokens(tokens, "quota_week", "", 0)
 		}
 
-
 		if isPaneMetadataUnchanged(target, displayAgent, title, tokens) {
 			continue
 		}
@@ -1201,8 +1234,6 @@ func isPaneMetadataUnchanged(target HerdrPaneMatch, newDisplayAgent, newTitle st
 	}
 	return true
 }
-
-
 
 // SetTerminalTitle is intentionally a no-op because writing raw OSC 0 escape sequences to os.Stderr
 // injects uncoordinated escape sequences into the PTY stream (especially across SSH bridges)
@@ -1360,4 +1391,3 @@ func StartHerdrQuotaWatcher(ctx context.Context, profileName string, modelName .
 		cancel()
 	}
 }
-

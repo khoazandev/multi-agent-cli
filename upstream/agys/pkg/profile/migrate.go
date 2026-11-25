@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,11 +13,10 @@ import (
 	"time"
 )
 
-// MigrateConversation moves a conversation's brain folder, database, annotations,
-// summaries, and history metadata from srcProfile to destProfile.
+// MigrateConversation moves a conversation's brain and database to another profile.
 func MigrateConversation(convID, srcProfile, destProfile string) error {
-	if convID == "" {
-		return fmt.Errorf("conversation ID cannot be empty")
+	if !validProfileNameRegex.MatchString(convID) {
+		return fmt.Errorf("invalid conversation ID %q", convID)
 	}
 	if srcProfile == "" || destProfile == "" {
 		return fmt.Errorf("source and destination profile names cannot be empty")
@@ -24,131 +24,96 @@ func MigrateConversation(convID, srcProfile, destProfile string) error {
 	if srcProfile == destProfile {
 		return nil
 	}
+	if IsWorkbenchMode() {
+		return fmt.Errorf("workbench conversations stay with their project and profile")
+	}
 
-	srcProfileDir, err := GetProfileDir(srcProfile)
+	source, err := GetProfileDir(srcProfile)
 	if err != nil {
-		return fmt.Errorf("failed to get source profile directory: %w", err)
+		return err
 	}
-
-	destProfileDir, err := GetProfileDir(destProfile)
+	destination, err := GetProfileDir(destProfile)
 	if err != nil {
-		return fmt.Errorf("failed to get destination profile directory: %w", err)
+		return err
 	}
-
-	// 1. Locate conversation directory in srcProfile
-	var srcConvDir string
-	var subBrainRel string
-
-	for _, sub := range []string{filepath.Join(".gemini", "antigravity-cli", "brain"), filepath.Join(".gemini", "antigravity", "brain")} {
-		candidate := filepath.Join(srcProfileDir, sub, convID)
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			srcConvDir = candidate
-			subBrainRel = sub
-			break
+	err = WithFileLock(context.Background(), func() error {
+		if err := moveConversationFiles(convID, source, destination); err != nil {
+			return err
 		}
+		migrateConversationSummary(convID, source, destination)
+		migrateHistoryEntry(convID, source, destination)
+		_ = SaveLastConversation(convID)
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-
-	hasConvDB := false
-	for _, sub := range []string{filepath.Join(".gemini", "antigravity-cli", "conversations"), filepath.Join(".gemini", "antigravity", "conversations")} {
-		if _, err := os.Stat(filepath.Join(srcProfileDir, sub, convID+".db")); err == nil {
-			hasConvDB = true
-			break
-		}
-	}
-
-	if srcConvDir == "" && !hasConvDB {
-		return fmt.Errorf("conversation %q not found in profile %q", convID, srcProfile)
-	}
-
-	// 2. Move brain directory if present
-	if srcConvDir != "" {
-		destBrainDir := filepath.Join(destProfileDir, subBrainRel)
-		if err := os.MkdirAll(destBrainDir, 0700); err != nil {
-			return fmt.Errorf("failed to create destination brain directory: %w", err)
-		}
-		destConvDir := filepath.Join(destBrainDir, convID)
-
-		// Clean up stale destination directory if it already exists
-		_ = os.RemoveAll(destConvDir)
-
-		// Move conversation brain directory atomically
-		if err := os.Rename(srcConvDir, destConvDir); err != nil {
-			return fmt.Errorf("failed to move conversation brain directory: %w", err)
-		}
-	}
-
-	// 3. Migrate conversation SQLite database (.db, .db-wal, .db-shm)
-	migrateConversationDB(convID, srcProfileDir, destProfileDir)
-
-	// 4. Migrate conversation annotations (.pbtxt)
-	migrateConversationAnnotations(convID, srcProfileDir, destProfileDir)
-
-	// 5. Migrate conversation summaries
-	migrateConversationSummary(convID, srcProfileDir, destProfileDir)
-
-	// 6. Migrate history.jsonl entries
-	migrateHistoryEntry(convID, srcProfileDir, destProfileDir)
-
-	// 7. Clean up stale presence lock in source profile if any
-	cleanStalePresence(convID, srcProfileDir)
-
-	// 8. Update last active conversation pointer to point to this convID
-	_ = SaveLastConversation(convID)
-
-	// 9. Invalidate stale session cache entry in source profile
-	if cache, err := LoadSessionCache(); err == nil {
+	_ = UpdateSessionCache(func(cache SessionCache) error {
 		delete(cache, srcProfile+":"+convID)
-		_ = SaveSessionCache(cache)
-	}
-
+		return nil
+	})
 	return nil
 }
 
-func migrateConversationDB(convID, srcProfileDir, destProfileDir string) {
-	for _, sub := range []string{
-		filepath.Join(".gemini", "antigravity-cli", "conversations"),
-		filepath.Join(".gemini", "antigravity", "conversations"),
-	} {
-		srcDir := filepath.Join(srcProfileDir, sub)
-		destDir := filepath.Join(destProfileDir, sub)
-
-		for _, ext := range []string{".db", ".db-wal", ".db-shm"} {
-			srcFile := filepath.Join(srcDir, convID+ext)
-			destFile := filepath.Join(destDir, convID+ext)
-			if _, err := os.Stat(srcFile); err == nil {
-				_ = os.MkdirAll(destDir, 0700)
-				_ = os.Remove(destFile)
-				_ = os.Rename(srcFile, destFile)
+func moveConversationFiles(id, source, destination string) error {
+	type move struct{ from, to string }
+	var moves []move
+	foundConversation := false
+	for _, app := range []string{"antigravity-cli", "antigravity"} {
+		base := filepath.Join(".gemini", app)
+		for _, profile := range []string{source, destination} {
+			presence := filepath.Join(profile, base, "presence", id+".lock")
+			if _, err := os.Lstat(presence); !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("cannot migrate conversation %q while its presence lock exists or is unreadable at %s", id, presence)
 			}
 		}
-	}
-}
-
-func migrateConversationAnnotations(convID, srcProfileDir, destProfileDir string) {
-	for _, sub := range []string{
-		filepath.Join(".gemini", "antigravity-cli", "annotations"),
-		filepath.Join(".gemini", "antigravity", "annotations"),
-	} {
-		srcDir := filepath.Join(srcProfileDir, sub)
-		destDir := filepath.Join(destProfileDir, sub)
-
-		srcFile := filepath.Join(srcDir, convID+".pbtxt")
-		destFile := filepath.Join(destDir, convID+".pbtxt")
-		if _, err := os.Stat(srcFile); err == nil {
-			_ = os.MkdirAll(destDir, 0700)
-			_ = os.Remove(destFile)
-			_ = os.Rename(srcFile, destFile)
+		for _, path := range []string{
+			filepath.Join("brain", id),
+			filepath.Join("conversations", id+".db"),
+			filepath.Join("conversations", id+".db-wal"),
+			filepath.Join("conversations", id+".db-shm"),
+			filepath.Join("annotations", id+".pbtxt"),
+		} {
+			from := filepath.Join(source, base, path)
+			to := filepath.Join(destination, base, path)
+			if _, err := os.Lstat(to); err == nil {
+				return fmt.Errorf("conversation %q already exists at %s", id, to)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			info, err := os.Lstat(from)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("conversation path is a symlink: %s", from)
+			}
+			if path == filepath.Join("brain", id) || path == filepath.Join("conversations", id+".db") {
+				foundConversation = true
+			}
+			moves = append(moves, move{from, to})
 		}
 	}
-}
-
-func cleanStalePresence(convID, srcProfileDir string) {
-	for _, sub := range []string{
-		filepath.Join(".gemini", "antigravity-cli", "presence"),
-		filepath.Join(".gemini", "antigravity", "presence"),
-	} {
-		_ = os.Remove(filepath.Join(srcProfileDir, sub, convID+".lock"))
+	if !foundConversation {
+		return fmt.Errorf("conversation %q not found", id)
 	}
+	for _, item := range moves {
+		if err := os.MkdirAll(filepath.Dir(item.to), 0700); err != nil {
+			return err
+		}
+	}
+	for i, item := range moves {
+		if err := os.Rename(item.from, item.to); err != nil {
+			for j := i - 1; j >= 0; j-- {
+				err = errors.Join(err, os.Rename(moves[j].to, moves[j].from))
+			}
+			return fmt.Errorf("move conversation %q: %w", id, err)
+		}
+	}
+	return nil
 }
 
 func migrateConversationSummary(convID, srcProfileDir, destProfileDir string) {
@@ -195,16 +160,19 @@ func migrateConversationSummary(convID, srcProfileDir, destProfileDir string) {
 			}
 		}
 
-		// Insert or replace row from source to destination
+		// Leave existing destination and source rows intact if the copy fails.
 		escapedSrcDB := strings.ReplaceAll(srcDB, "'", "''")
 		attachSQL := fmt.Sprintf(
-			"ATTACH DATABASE '%s' AS src; INSERT OR REPLACE INTO conversation_summaries SELECT * FROM src.conversation_summaries WHERE conversation_id = '%s'; DETACH DATABASE src;",
+			"ATTACH DATABASE '%s' AS src; INSERT INTO conversation_summaries SELECT * FROM src.conversation_summaries WHERE conversation_id = '%s'; DETACH DATABASE src;",
 			escapedSrcDB, escapedConvID,
 		)
 		ctxMigrate, cancelMigrate := context.WithTimeout(context.Background(), 2*time.Second)
 		migrateCmd := exec.CommandContext(ctxMigrate, sqlitePath, destDB, attachSQL)
-		_ = migrateCmd.Run()
+		err = migrateCmd.Run()
 		cancelMigrate()
+		if err != nil {
+			continue
+		}
 
 		// Delete row from source DB to keep it clean
 		ctxDel, cancelDel := context.WithTimeout(context.Background(), 2*time.Second)

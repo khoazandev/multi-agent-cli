@@ -36,6 +36,20 @@ func TestGetUpdaterDir(t *testing.T) {
 	}
 }
 
+func TestWorkbenchDisablesBackgroundUpdate(t *testing.T) {
+	original := version.Version
+	version.Version = "1.0.0"
+	t.Cleanup(func() { version.Version = original })
+	t.Setenv("MULTI_AGENT_CLI", "1")
+	t.Setenv("CI", "")
+	t.Setenv("AGYS_NO_AUTO_UPDATE", "")
+	t.Setenv("AGYS_AUTO_UPDATE", "")
+	t.Setenv("AGYS_DIR", t.TempDir())
+	if ShouldTriggerAutoUpdate("run") {
+		t.Fatal("workbench launched the upstream updater")
+	}
+}
+
 func TestGetCheckInterval(t *testing.T) {
 	// Default
 	t.Setenv("AGYS_UPDATE_INTERVAL", "")

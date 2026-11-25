@@ -82,6 +82,55 @@ func TestExportImport(t *testing.T) {
 	}
 }
 
+func TestFailedForcedImportKeepsExistingProfiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGYS_DIR", filepath.Join(home, ".agys"))
+	alpha, err := GetProfileDir("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(alpha, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(alpha, "marker")
+	for _, test := range []struct {
+		name    string
+		restore func(io.Reader) error
+	}{
+		{"one profile", func(r io.Reader) error { return ImportProfile(r, "alpha", true) }},
+		{"all profiles", func(r io.Reader) error { return ImportAll(r, true) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(marker, []byte("original"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var archive bytes.Buffer
+			gz := gzip.NewWriter(&archive)
+			tarWriter := tar.NewWriter(gz)
+			if err := tarWriter.WriteHeader(&tar.Header{Name: "alpha/marker", Mode: 0600, Size: 11}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tarWriter.Write([]byte("replacement")); err != nil {
+				t.Fatal(err)
+			}
+			if err := tarWriter.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := gz.Close(); err != nil {
+				t.Fatal(err)
+			}
+			data := archive.Bytes()
+			data[len(data)-1] ^= 0xff
+			if err := test.restore(bytes.NewReader(data)); err == nil {
+				t.Error("expected invalid gzip checksum to fail")
+			}
+			if content, err := os.ReadFile(marker); err != nil || string(content) != "original" {
+				t.Errorf("profile after failed import = %q, %v; want original", content, err)
+			}
+		})
+	}
+}
+
 func TestExportImportAll(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
@@ -311,5 +360,3 @@ func TestExportProfile_GitConfigExclusion(t *testing.T) {
 		t.Errorf("expected regular (isolated) .gitconfig to be included in profile archive")
 	}
 }
-
-

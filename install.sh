@@ -16,30 +16,58 @@ done
 
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bin_dir="$HOME/.local/bin"
-plugin_dir="$HOME/.local/share/antigravity-herdr-workbench/plugin"
+library="$HOME/.local/lib/multi-agent-cli"
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
-mkdir -p -- "$bin_dir"
+mkdir -p -- "$bin_dir" "$library"
 export PATH="$bin_dir:$PATH"
 
 download_verified() {
     local url=$1 expected=$2 output=$3
     curl -fLsS --retry 2 --connect-timeout 15 --max-time 180 "$url" -o "$output"
-    printf '%s  %s\n' "$expected" "$output" | sha256sum --check --status
+    if ! has_digest "$expected" "$output"; then
+        printf 'Checksum mismatch for %s.\n' "$url" >&2
+        exit 1
+    fi
 }
 
-if [[ ! -x "$bin_dir/herdr" ]]; then
-    download_verified 'https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64' \
-        '14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d' "$stage/herdr"
-    install -m 0755 "$stage/herdr" "$bin_dir/herdr"
+has_digest() {
+    [[ -r "$2" ]] && printf '%s  %s\n' "$1" "$2" | sha256sum --check --status
+}
+
+replace_file() {
+    local source=$1 mode=$2 destination=$3 temporary
+    temporary=$(mktemp -- "$destination.new.XXXXXX")
+    install -m "$mode" "$source" "$temporary"
+    mv -fT -- "$temporary" "$destination"
+}
+
+herdr_sha='14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d'
+if ! has_digest "$herdr_sha" "$library/herdr"; then
+    if has_digest "$herdr_sha" "$bin_dir/herdr"; then
+        replace_file "$bin_dir/herdr" 0755 "$library/herdr"
+    else
+        download_verified 'https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64' \
+            "$herdr_sha" "$stage/herdr"
+        replace_file "$stage/herdr" 0755 "$library/herdr"
+    fi
 fi
 
-if [[ ! -x "$bin_dir/agys" ]]; then
-    download_verified 'https://github.com/quaywin/agys/releases/download/v0.2.40/agys_0.2.40_linux_amd64.tar.gz' \
-        'e064673326f5caa5a9b1741897ba85d70ad3e69d3e4d18772a82faf3418b7f02' "$stage/agys.tar.gz"
-    tar -xzf "$stage/agys.tar.gz" -C "$stage" agys
-    install -m 0755 "$stage/agys" "$bin_dir/agys"
+go_version='go1.26.8'
+go_command=$(command -v go || true)
+if [[ -z "$go_command" || "$(GOTOOLCHAIN=local "$go_command" version)" != "go version $go_version linux/amd64" ]]; then
+    download_verified "https://go.dev/dl/$go_version.linux-amd64.tar.gz" \
+        'd0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b' "$stage/go.tar.gz"
+    tar -xzf "$stage/go.tar.gz" -C "$stage"
+    go_command="$stage/go/bin/go"
 fi
+
+(
+    cd "$repo_dir/upstream/agys"
+    GOTOOLCHAIN=local CGO_ENABLED=0 "$go_command" build -trimpath -buildvcs=false -mod=readonly \
+        -ldflags '-X github.com/quaywin/agys/pkg/version.Version=0.2.40-multi-agent-cli' \
+        -o "$stage/agys" .
+)
 
 if ! command -v agy >/dev/null; then
     curl -fLsS --retry 2 --connect-timeout 15 --max-time 90 \
@@ -47,14 +75,15 @@ if ! command -v agy >/dev/null; then
     bash "$stage/install-agy.sh"
 fi
 
-install -m 0755 "$repo_dir/scripts/agy-herdr-projects.py" "$bin_dir/agy-herdr-projects"
-plugin_list=$("$bin_dir/herdr" plugin list)
-if [[ "$plugin_list" != *quaywin.agys* ]]; then
-    install -D -m 0644 "$repo_dir/upstream/agys/herdr-plugin.toml" "$plugin_dir/herdr-plugin.toml"
-    "$bin_dir/herdr" plugin link "$plugin_dir"
-fi
+replace_file "$stage/agys" 0755 "$library/agys"
+replace_file "$repo_dir/scripts/herdr_layout.py" 0644 "$library/herdr_layout.py"
+replace_file "$repo_dir/scripts/agy-herdr-projects.py" 0755 "$library/agy-herdr-projects.py"
+launcher_stage=$(mktemp -d "$bin_dir/.multi-agent-cli.XXXXXX")
+ln -s -- "$library/agy-herdr-projects.py" "$launcher_stage/agy-herdr-projects"
+mv -fT -- "$launcher_stage/agy-herdr-projects" "$bin_dir/agy-herdr-projects"
+rmdir -- "$launcher_stage"
 
-"$bin_dir/herdr" --version
-"$bin_dir/agys" --version
+"$library/herdr" --version
+"$library/agys" --version
 agy --version
 printf '\nOpen the workbench with %s/agy-herdr-projects --choose\n' "$bin_dir"

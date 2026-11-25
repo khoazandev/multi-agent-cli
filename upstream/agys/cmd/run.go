@@ -23,6 +23,19 @@ var runCmd = &cobra.Command{
 	ValidArgsFunction: CompleteRunArgs,
 	Args:              cobra.MinimumNArgs(0),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if profile.IsWorkbenchMode() {
+			if runAll || len(args) == 0 || cmd.ArgsLenAtDash() == 0 {
+				return fmt.Errorf("workbench runs require one explicit profile")
+			}
+			exists, _, err := profile.Exists(args[0])
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return fmt.Errorf("profile %q does not exist", args[0])
+			}
+			return runWithProfile(cmd, args[0], args[1:])
+		}
 		if runAll {
 			profiles, err := profile.List()
 			if err != nil {
@@ -302,6 +315,21 @@ func runWithProfileAndDir(cmd *cobra.Command, profileName string, agyArgs []stri
 	// Persist any token created in macOS Keychain during execution (e.g. login) to profile disk storage
 	profile.SyncKeychainTokenToDisk(profileDir, expectedRefreshToken)
 
+	if profile.IsWorkbenchMode() {
+		if runErr == nil && isInteractiveSession(originalUserArgs) {
+			directory := workingDir
+			if directory == "" {
+				directory, _ = os.Getwd()
+			}
+			if sessions, err := profile.WorkbenchSessions(targetProfile, directory); err == nil && len(sessions) > 0 {
+				if argv := profile.WorkbenchResumeArgv(targetProfile, sessions[0].ConvID); argv != nil {
+					fmt.Printf("Resume with %s\n", strings.Join(argv, " "))
+				}
+			}
+		}
+		return runErr
+	}
+
 	// Capture latest conversation info after execution
 	idAfter, _, _ := profile.GetLatestConversationFileInfo(targetProfile)
 
@@ -402,21 +430,21 @@ var agySubcommands = map[string]bool{
 }
 
 var agyBoolFlags = map[string]bool{
-	"-c":                             true,
-	"--continue":                     true,
-	"--dangerously-skip-permissions": true,
-	"--disable-slash-commands":       true,
-	"--disable-telemetry":            true,
+	"-c":                               true,
+	"--continue":                       true,
+	"--dangerously-skip-permissions":   true,
+	"--disable-slash-commands":         true,
+	"--disable-telemetry":              true,
 	"--include-default-customizations": true,
-	"--login":                        true,
-	"--new-project":                  true,
-	"--process-per-session":          true,
-	"--sandbox":                      true,
-	"--stdio":                        true,
-	"-h":                             true,
-	"--help":                         true,
-	"-v":                             true,
-	"--version":                      true,
+	"--login":                          true,
+	"--new-project":                    true,
+	"--process-per-session":            true,
+	"--sandbox":                        true,
+	"--stdio":                          true,
+	"-h":                               true,
+	"--help":                           true,
+	"-v":                               true,
+	"--version":                        true,
 }
 
 var agySubcommandVerbs = map[string]map[string]bool{
@@ -581,6 +609,14 @@ func EnsureDefaultModelAndEffortWithModel(args []string, defaultModel string) []
 }
 
 func resolveResumeProfile(profileName string, agyArgs []string, workingDir ...string) (string, []string, error) {
+	if profile.IsWorkbenchMode() {
+		directory := ""
+		if len(workingDir) > 0 {
+			directory = workingDir[0]
+		}
+		args, err := resolveWorkbenchResume(profileName, agyArgs, directory)
+		return profileName, args, err
+	}
 	var detectedProfile string
 	var detectedConvID string
 	var detectErr error

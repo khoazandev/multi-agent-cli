@@ -10,7 +10,7 @@ import (
 // (or copies it on filesystems where symlinking is unavailable) so that Git commands executed under
 // the isolated profile preserve the user's Git author name, email, aliases, and core settings.
 func EnsureGitConfig(profileDir string) error {
-	if profileDir == "" {
+	if profileDir == "" || IsWorkbenchMode() {
 		return nil
 	}
 	profileGitConfig := filepath.Join(profileDir, ".gitconfig")

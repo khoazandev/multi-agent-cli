@@ -381,20 +381,26 @@ func BuildCmdContext(ctx context.Context, profileDir string, args ...string) *ex
 	realUserHome, _ := GetRealUserHome()
 
 	envMap := map[string]string{
-		"AGYS_PROFILE":    filepath.Base(profileDir),
-		"AGYS_REAL_HOME":  realUserHome,
-		"HOME":            profileDir,
-		"USERPROFILE":     profileDir,
-		"GEMINI_DIR":      filepath.Join(profileDir, ".gemini"),
-		"GEMINI_CLI_DIR":  filepath.Join(profileDir, ".gemini", "antigravity-cli"),
-		"ANTIGRAVITY_DIR": filepath.Join(profileDir, ".gemini", "antigravity-cli"),
+		"AGYS_PROFILE":      filepath.Base(profileDir),
+		"AGYS_REAL_HOME":    realUserHome,
+		"HOME":              profileDir,
+		"USERPROFILE":       profileDir,
+		"GEMINI_DIR":        filepath.Join(profileDir, ".gemini"),
+		"GEMINI_CLI_DIR":    filepath.Join(profileDir, ".gemini", "antigravity-cli"),
+		"ANTIGRAVITY_DIR":   filepath.Join(profileDir, ".gemini", "antigravity-cli"),
 		"XDG_CONFIG_HOME":   filepath.Join(profileDir, ".config"),
 		"XDG_DATA_HOME":     filepath.Join(profileDir, ".local", "share"),
 		"XDG_CACHE_HOME":    filepath.Join(profileDir, ".cache"),
 		"HERDR_CONFIG_PATH": GetHerdrConfigPath(),
 	}
 
-	if os.Getenv("GIT_CONFIG_GLOBAL") == "" {
+	if IsWorkbenchMode() {
+		config := filepath.Join(profileDir, ".gitconfig")
+		if info, err := os.Lstat(config); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			config = filepath.Join(profileDir, ".config", "git", "config")
+		}
+		envMap["GIT_CONFIG_GLOBAL"] = config
+	} else if os.Getenv("GIT_CONFIG_GLOBAL") == "" {
 		profileGitConfig := filepath.Join(profileDir, ".gitconfig")
 		if _, err := os.Stat(profileGitConfig); err == nil {
 			envMap["GIT_CONFIG_GLOBAL"] = profileGitConfig
@@ -459,6 +465,7 @@ func SanitizeAgyEnv(baseEnv []string, envMap map[string]string) []string {
 
 	newEnv := make([]string, 0, len(baseEnv)+len(mergedMap))
 	seen := make(map[string]bool, len(mergedMap))
+	workbench := IsWorkbenchMode()
 
 	for _, e := range baseEnv {
 		parts := strings.SplitN(e, "=", 2)
@@ -467,6 +474,12 @@ func SanitizeAgyEnv(baseEnv []string, envMap map[string]string) []string {
 			// Strip SSH variables to disable agy's remote DA2 probe
 			if key == "SSH_CLIENT" || key == "SSH_CONNECTION" || key == "SSH_TTY" {
 				continue
+			}
+			if workbench {
+				switch key {
+				case "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GIT_CONFIG_GLOBAL":
+					continue
+				}
 			}
 			if newVal, ok := mergedMap[key]; ok {
 				if !seen[key] {
@@ -894,4 +907,3 @@ func GetConfigSummary(name string) string {
 	}
 	return "-"
 }
-

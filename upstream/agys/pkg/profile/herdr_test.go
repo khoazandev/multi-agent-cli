@@ -236,6 +236,76 @@ func TestHandleHerdrHook(t *testing.T) {
 	}
 }
 
+func TestWorkbenchHookRecordsScopedResume(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("MULTI_AGENT_CLI", "1")
+	t.Setenv("MULTI_AGENT_CLI_RUNNER", "agy-herdr-projects")
+	t.Setenv("MULTI_AGENT_CLI_SESSION_FILE", filepath.Join(root, "session"))
+	t.Setenv("AGYS_REAL_HOME", root)
+	t.Setenv("AGYS_DIR", filepath.Join(root, ".agys"))
+	t.Setenv("AGYS_PROFILE", "beta")
+	t.Setenv("HERDR_CONFIG_PATH", filepath.Join(root, "herdr.toml"))
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+
+	profileDir, err := GetProfileDir("beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileAtomic(filepath.Join(profileDir, ".active_model"), []byte("gemini-3.8-flash"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(root, "herdr.sock")
+	t.Setenv("HERDR_SOCKET_PATH", socket)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	requests := make(chan string, 4)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.SetDeadline(time.Now().Add(time.Second))
+			var request json.RawMessage
+			if json.NewDecoder(conn).Decode(&request) == nil {
+				select {
+				case requests <- string(request):
+				default:
+				}
+			}
+			_, _ = conn.Write([]byte("{\"result\":{}}\n"))
+			_ = conn.Close()
+		}
+	}()
+	if err := HandleHerdrHook(context.Background(), "session", strings.NewReader(`{"conversationId":"owned-123"}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case request := <-requests:
+		if !strings.Contains(request, `"resume_argv":["agy-herdr-projects","run","beta","--","--conversation=owned-123"]`) {
+			t.Errorf("unexpected resume command: %s", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no session report")
+	}
+	sessionFile := os.Getenv("MULTI_AGENT_CLI_SESSION_FILE")
+	if content, err := os.ReadFile(sessionFile); err != nil || string(content) != "owned-123\n" {
+		t.Errorf("recorded session = %q, %v", content, err)
+	}
+	if err := HandleHerdrHook(context.Background(), "session", strings.NewReader(`{"conversationId":"../invalid"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(sessionFile); err != nil || string(content) != "owned-123\n" {
+		t.Errorf("invalid payload changed recorded session = %q, %v", content, err)
+	}
+	if _, err := os.Stat(GetHerdrConfigPath()); !os.IsNotExist(err) {
+		t.Errorf("workbench session hook modified Herdr config, stat error = %v", err)
+	}
+}
+
 func TestHandleHerdrHookQuotaIgnoresCodexPane(t *testing.T) {
 	sockPath := fmt.Sprintf("/tmp/herdr_hook_codex_%d.sock", time.Now().UnixNano())
 	_ = os.Remove(sockPath)
@@ -1632,7 +1702,6 @@ func TestReportHerdrMetadata_NeverOverwritesOtherAgentsOrPanes(t *testing.T) {
 	}
 }
 
-
 func TestHandleHerdrHook_InternalExecSuppression(t *testing.T) {
 	t.Setenv("AGYS_INTERNAL_EXEC", "1")
 	t.Setenv("HERDR_SOCKET_PATH", "/tmp/nonexistent.sock")
@@ -1816,6 +1885,3 @@ func TestReportHerdrQuotaOnly_UpdatesAllPanesOfProfile(t *testing.T) {
 		}
 	}
 }
-
-
-

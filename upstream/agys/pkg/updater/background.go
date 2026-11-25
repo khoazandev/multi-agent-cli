@@ -66,6 +66,9 @@ func GetCheckInterval() time.Duration {
 
 // ShouldTriggerAutoUpdate evaluates guards to decide if a background check should run.
 func ShouldTriggerAutoUpdate(cmdName string) bool {
+	if profile.IsWorkbenchMode() {
+		return false
+	}
 	// 1. Guard against hook processes, updater worker itself, completion, and manual commands
 	if profile.IsHookProcess() {
 		return false
@@ -176,6 +179,9 @@ func WriteUpdateStatus(dir string, status *UpdateStatus) error {
 
 // RunBackgroundWorker is executed by `agys __bg-updater` in the detached background process.
 func RunBackgroundWorker() error {
+	if profile.IsWorkbenchMode() {
+		return nil
+	}
 	updaterDir, err := GetUpdaterDir()
 	if err != nil {
 		return err
@@ -298,6 +304,9 @@ func RunBackgroundWorker() error {
 
 // NotifyIfRecentlyUpdated checks ~/.agys/updater/update_status.json and prints a discreet notification once.
 func NotifyIfRecentlyUpdated(cmdName string) {
+	if profile.IsWorkbenchMode() {
+		return
+	}
 	if profile.IsHookProcess() {
 		return
 	}

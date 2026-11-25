@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -31,22 +33,8 @@ var exportCmd = &cobra.Command{
 				outPath = "agys_profiles_backup.tar.gz"
 			}
 
-			parentDir := filepath.Dir(outPath)
-			if parentDir != "" && parentDir != "." {
-				if err := os.MkdirAll(parentDir, 0755); err != nil {
-					return fmt.Errorf("failed to create output directory: %w", err)
-				}
-			}
-
-			file, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-			if err != nil {
-				return fmt.Errorf("failed to create export file: %w", err)
-			}
-			defer file.Close()
-
 			fmt.Println("Exporting all profiles...")
-			if err := profile.ExportAll(file); err != nil {
-				_ = os.Remove(outPath)
+			if err := writeProfileArchive(outPath, profile.ExportAll); err != nil {
 				return err
 			}
 
@@ -77,22 +65,10 @@ var exportCmd = &cobra.Command{
 			outPath = profileName + ".tar.gz"
 		}
 
-		parentDir := filepath.Dir(outPath)
-		if parentDir != "" && parentDir != "." {
-			if err := os.MkdirAll(parentDir, 0755); err != nil {
-				return fmt.Errorf("failed to create output directory: %w", err)
-			}
-		}
-
-		file, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-		if err != nil {
-			return fmt.Errorf("failed to create export file: %w", err)
-		}
-		defer file.Close()
-
 		fmt.Printf("Exporting profile %q...\n", profileName)
-		if err := profile.ExportProfile(profileName, file); err != nil {
-			_ = os.Remove(outPath)
+		if err := writeProfileArchive(outPath, func(writer io.Writer) error {
+			return profile.ExportProfile(profileName, writer)
+		}); err != nil {
 			return err
 		}
 
@@ -103,6 +79,31 @@ var exportCmd = &cobra.Command{
 		fmt.Printf("Successfully exported profile %q to %s\n", profileName, absPath)
 		return nil
 	},
+}
+
+func writeProfileArchive(path string, export func(io.Writer) error) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create export directory: %w", err)
+	}
+	file, err := os.CreateTemp(dir, ".agys-export-*")
+	if err != nil {
+		return fmt.Errorf("create temporary archive: %w", err)
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+
+	writeErr := export(file)
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return fmt.Errorf("write profile archive: %w", err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return fmt.Errorf("publish profile archive: %w", err)
+	}
+	return nil
 }
 
 func init() {

@@ -44,9 +44,9 @@ type StatusLinePayload struct {
 	ConversationTitleAlt string  `json:"conversationTitle,omitempty"`
 	Title                string  `json:"title,omitempty"`
 	Cost                 float64 `json:"cost"`
-	Effort            string  `json:"effort,omitempty"`
-	ReasoningEffort   string  `json:"reasoning_effort,omitempty"`
-	Model             struct {
+	Effort               string  `json:"effort,omitempty"`
+	ReasoningEffort      string  `json:"reasoning_effort,omitempty"`
+	Model                struct {
 		ID          string `json:"id"`
 		DisplayName string `json:"display_name"`
 	} `json:"model"`
@@ -759,6 +759,10 @@ func SyncStatusLineSettings(profileDir string) error {
 	}
 
 	hookCommand := "agys statusline-hook"
+	if IsWorkbenchMode() {
+		hookCommand = `"$MULTI_AGENT_CLI_AGYS" statusline-hook`
+		candidatePaths = []string{cliPath}
+	}
 
 	for _, sPath := range candidatePaths {
 		// Only auto-create directory for CLI settings; for GUI/IDE only update if already initialized
@@ -783,15 +787,20 @@ func SyncStatusLineSettings(profileDir string) error {
 
 		// Check if already installed
 		if sl, ok := settings["statusLine"].(map[string]interface{}); ok {
-			if cmdStr, ok := sl["command"].(string); ok && strings.Contains(cmdStr, "statusline-hook") {
-				continue
-			}
-			// Backup original statusLine if not already backed up
-			backupPath := filepath.Join(profileDir, ".gemini", "config", statuslineBackupFile)
-			if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-				_ = os.MkdirAll(filepath.Dir(backupPath), 0700)
-				bData, _ := json.MarshalIndent(sl, "", "  ")
-				_ = WriteFileAtomic(backupPath, bData, 0600)
+			cmdStr, _ := sl["command"].(string)
+			isManaged := strings.Contains(cmdStr, "statusline-hook")
+			if isManaged {
+				if !IsWorkbenchMode() || cmdStr == hookCommand {
+					continue
+				}
+			} else {
+				// Keep the user's original status line when installing the managed hook.
+				backupPath := filepath.Join(profileDir, ".gemini", "config", statuslineBackupFile)
+				if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+					_ = os.MkdirAll(filepath.Dir(backupPath), 0700)
+					bData, _ := json.MarshalIndent(sl, "", "  ")
+					_ = WriteFileAtomic(backupPath, bData, 0600)
+				}
 			}
 		}
 

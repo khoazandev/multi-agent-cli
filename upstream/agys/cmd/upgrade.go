@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/quaywin/agys/pkg/profile"
 	"github.com/quaywin/agys/pkg/updater"
 	"github.com/quaywin/agys/pkg/version"
 	"github.com/spf13/cobra"
@@ -23,6 +24,9 @@ var upgradeCmd = &cobra.Command{
 	Short:   "Upgrade agys CLI to the latest version",
 	Long:    `Check for available releases on GitHub and upgrade the local agys binary in-place.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if profile.IsWorkbenchMode() {
+			return fmt.Errorf("rerun the Multi Agent CLI installer to update its bundled agys")
+		}
 		currentVer := version.Version
 		fmt.Printf("Current version: v%s (%s/%s)\n", updater.CleanVersion(currentVer), runtime.GOOS, runtime.GOARCH)
 		fmt.Println("Checking for latest release on GitHub...")

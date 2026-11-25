@@ -1,0 +1,33 @@
+name: Workbench checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.8'
+          cache-dependency-path: upstream/agys/go.sum
+      - name: Test agys
+        working-directory: upstream/agys
+        run: |
+          go test -count=1 ./...
+          go vet ./...
+      - name: Verify installer and run Herdr integration tests
+        run: |
+          bash -n install.sh
+          fixture_herdr="$RUNNER_TEMP/herdr"
+          curl -fLsS --retry 2 --max-time 120 \
+            https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64 \
+            -o "$fixture_herdr"
+          printf '%s  %s\n' 14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d "$fixture_herdr" | sha256sum -c -
+          chmod 0755 "$fixture_herdr"
+          HERDR_TEST_BIN="$fixture_herdr" python3 -B -m unittest discover -s tests
