@@ -76,6 +76,7 @@ if ! command -v agy >/dev/null; then
 fi
 
 replace_file "$stage/agys" 0755 "$library/agys"
+replace_file "$repo_dir/scripts/desktop_api.py" 0644 "$library/desktop_api.py"
 replace_file "$repo_dir/scripts/herdr_layout.py" 0644 "$library/herdr_layout.py"
 replace_file "$repo_dir/scripts/agy-herdr-projects.py" 0755 "$library/agy-herdr-projects.py"
 launcher_stage=$(mktemp -d "$bin_dir/.multi-agent-cli.XXXXXX")

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -91,6 +92,84 @@ class WorkbenchTests(unittest.TestCase):
         destination.write_text('{"token":{"refresh_token":"own-login"}}')
         self.assertFalse(workbench.reuse_account_login(target, source.profile, [source, target], self.profiles))
         self.assertIn("own-login", destination.read_text())
+
+    def test_list_project_conversations_filters_by_repo_and_extracts_title(self):
+        project = workbench.project_for(1)
+        project.repo.mkdir(parents=True)
+        other_repo = self.root / "other-repo"
+        other_repo.mkdir()
+        app_dir = self.profiles / "profiles" / project.profile / ".gemini" / "antigravity-cli"
+        app_dir.mkdir(parents=True)
+        for cid in ("conv-old", "conv-new", "conv-other"):
+            transcript = app_dir / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text('{"type":"USER_INPUT","content":"<USER_REQUEST>\\nFix login flow\\n</USER_REQUEST>"}\n')
+        (app_dir / "history.jsonl").write_text(
+            json.dumps({"conversationId": "conv-old", "workspace": str(project.repo), "display": "Initial chat", "timestamp": 1000}) + "\n"
+            + json.dumps({"conversationId": "conv-new", "workspace": str(project.repo), "display": "", "timestamp": 2000}) + "\n"
+            + json.dumps({"conversationId": "conv-other", "workspace": str(other_repo), "display": "Other repo", "timestamp": 3000}) + "\n"
+        )
+        pointer = workbench.session_file(project, project.profile)
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text("conv-old\n")
+
+        sessions = workbench.list_project_conversations(project, project.profile, self.profiles)
+        self.assertEqual([item["id"] for item in sessions], ["conv-new", "conv-old"])
+        self.assertEqual(sessions[0]["title"], "Fix login flow")
+        self.assertFalse(sessions[0]["current"])
+        self.assertEqual(sessions[1]["title"], "Initial chat")
+        self.assertTrue(sessions[1]["current"])
+
+    def test_reuse_updates_seeded_slot_after_relogin_while_keeping_own_login(self):
+        source = workbench.project_for(1)
+        target = workbench.assign_account_slots(
+            workbench.Project("other", "Second repo", self.root / "other", (source.profile,)), [source])
+        profiles = self.profiles / "profiles"
+        source_path = profiles / source.profile / workbench.credential_paths[0]
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text('{"token":{"refresh_token":"old-token"}}')
+        destination = profiles / target.runtime_profile(source.profile) / workbench.credential_paths[0]
+
+        self.assertTrue(workbench.reuse_account_login(target, source.profile, [source, target], self.profiles))
+        os.utime(destination, (1000, 1000))
+        source_path.write_text('{"token":{"refresh_token":"new-token"}}')
+        os.utime(source_path, (2000, 2000))
+
+        self.assertTrue(workbench.reuse_account_login(target, source.profile, [source, target], self.profiles))
+        self.assertEqual(json.loads(destination.read_text())["token"]["refresh_token"], "new-token")
+
+        destination.write_text('{"token":{"refresh_token":"own-login"}}')
+        source_path.write_text('{"token":{"refresh_token":"third-token"}}')
+        os.utime(source_path, (3000, 3000))
+        self.assertFalse(workbench.reuse_account_login(target, source.profile, [source, target], self.profiles))
+        self.assertIn("own-login", destination.read_text())
+
+    def test_list_project_conversations_filters_by_repo_and_extracts_title(self):
+        project = workbench.project_for(1)
+        project.repo.mkdir(parents=True)
+        other_repo = self.root / "other-repo"
+        other_repo.mkdir()
+        app_dir = self.profiles / "profiles" / project.profile / ".gemini" / "antigravity-cli"
+        app_dir.mkdir(parents=True)
+        for cid in ("conv-old", "conv-new", "conv-other"):
+            transcript = app_dir / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text('{"type":"USER_INPUT","content":"<USER_REQUEST>\\nFix login flow\\n</USER_REQUEST>"}\n')
+        (app_dir / "history.jsonl").write_text(
+            json.dumps({"conversationId": "conv-old", "workspace": str(project.repo), "display": "Initial chat", "timestamp": 1000}) + "\n"
+            + json.dumps({"conversationId": "conv-new", "workspace": str(project.repo), "display": "", "timestamp": 2000}) + "\n"
+            + json.dumps({"conversationId": "conv-other", "workspace": str(other_repo), "display": "Other repo", "timestamp": 3000}) + "\n"
+        )
+        pointer = workbench.session_file(project, project.profile)
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text("conv-old\n")
+
+        sessions = workbench.list_project_conversations(project, project.profile, self.profiles)
+        self.assertEqual([item["id"] for item in sessions], ["conv-new", "conv-old"])
+        self.assertEqual(sessions[0]["title"], "Fix login flow")
+        self.assertFalse(sessions[0]["current"])
+        self.assertEqual(sessions[1]["title"], "Initial chat")
+        self.assertTrue(sessions[1]["current"])
 
 
 if __name__ == "__main__":

@@ -737,7 +737,7 @@ var (
 	}
 
 	agysHerdrTokenKeys = []string{
-		"profile", "model", "group", "conversation_title", "cost",
+		"profile", "account", "model", "group", "conversation_title", "cost",
 		"quota_context", "quota_model_context",
 		"quota_5h_normal", "quota_5h_warning", "quota_5h_danger",
 		"quota_week_normal", "quota_week_warning", "quota_week_danger",
@@ -758,7 +758,7 @@ type HerdrPaneMatch struct {
 func createPaneMatch(p HerdrRawPane, profileName, currentModel string) HerdrPaneMatch {
 	disp := p.DisplayAgent
 	if disp == "" {
-		disp = profileName
+		disp = DisplayProfileName(profileName)
 	}
 	model := currentModel
 	var quotaModelContext, quotaContext string
@@ -792,14 +792,15 @@ func getHerdrCurrentPaneFromList(panes []HerdrRawPane, paneID, profileName, curr
 	return HerdrPaneMatch{
 		PaneID:       paneID,
 		Model:        currentModel,
-		DisplayAgent: profileName,
+		DisplayAgent: DisplayProfileName(profileName),
 	}
 }
 
 func getMatchingHerdrPanesFromList(ctx context.Context, panes []HerdrRawPane, socketPath, currentPaneID, profileName, currentModel string) []HerdrPaneMatch {
+	displayProfile := DisplayProfileName(profileName)
 	if len(panes) == 0 {
 		if currentPaneID != "" {
-			return []HerdrPaneMatch{{PaneID: currentPaneID, Model: currentModel, DisplayAgent: profileName}}
+			return []HerdrPaneMatch{{PaneID: currentPaneID, Model: currentModel, DisplayAgent: displayProfile}}
 		}
 		return nil
 	}
@@ -828,11 +829,13 @@ func getMatchingHerdrPanesFromList(ctx context.Context, panes []HerdrRawPane, so
 		isMatch := false
 		if p.Tokens != nil && p.Tokens["profile"] == profileName {
 			isMatch = true
-		} else if p.DisplayAgent == profileName || p.Agent == profileName {
+		} else if IsWorkbenchMode() && displayProfile != "" && p.Tokens != nil && p.Tokens["account"] == displayProfile {
+			isMatch = true
+		} else if p.DisplayAgent == profileName || (displayProfile != "" && p.DisplayAgent == displayProfile) || p.Agent == profileName {
 			isMatch = true
 		} else if currentPaneID != "" && p.PaneID == currentPaneID {
 			if (p.Tokens == nil || p.Tokens["profile"] == "" || p.Tokens["profile"] == profileName) &&
-				(p.DisplayAgent == "" || p.DisplayAgent == profileName || p.DisplayAgent == "agy" || p.DisplayAgent == "Antigravity") {
+				(p.DisplayAgent == "" || p.DisplayAgent == profileName || (displayProfile != "" && p.DisplayAgent == displayProfile) || p.DisplayAgent == "agy" || p.DisplayAgent == "Antigravity") {
 				isMatch = true
 			}
 		}
@@ -873,6 +876,11 @@ func resolveProfileFromPaneList(panes []HerdrRawPane, paneID string) string {
 			if !isPaneActiveAgys(p.Agent, p.Title, p.TerminalTitle, p.TerminalTitleStripped) {
 				return ""
 			}
+			if p.Tokens != nil && p.Tokens["profile"] != "" && !IsAuto(p.Tokens["profile"]) {
+				if _, err := GetProfileDir(p.Tokens["profile"]); err == nil {
+					return p.Tokens["profile"]
+				}
+			}
 			title := p.TerminalTitle
 			if title == "" {
 				title = p.TerminalTitleStripped
@@ -883,11 +891,6 @@ func resolveProfileFromPaneList(panes []HerdrRawPane, paneID string) string {
 					if _, err := GetProfileDir(parts[0]); err == nil {
 						return parts[0]
 					}
-				}
-			}
-			if p.Tokens != nil && p.Tokens["profile"] != "" && !IsAuto(p.Tokens["profile"]) {
-				if _, err := GetProfileDir(p.Tokens["profile"]); err == nil {
-					return p.Tokens["profile"]
 				}
 			}
 			if p.DisplayAgent != "" && !IsAuto(p.DisplayAgent) {
@@ -1030,8 +1033,12 @@ func reportHerdrMetadataInternal(ctx context.Context, profileName, modelName str
 		}
 
 		isCurrentPane := paneID != "" && target.PaneID == paneID
+		displayProfile := DisplayProfileName(profileName)
+		if displayProfile == profileName && target.Tokens != nil && target.Tokens["account"] != "" && ValidateName(target.Tokens["account"]) == nil {
+			displayProfile = target.Tokens["account"]
+		}
 
-		displayAgent := profileName
+		displayAgent := displayProfile
 		if !isCurrentPane && target.DisplayAgent != "" {
 			displayAgent = target.DisplayAgent
 		}
@@ -1049,16 +1056,23 @@ func reportHerdrMetadataInternal(ctx context.Context, profileName, modelName str
 			} else if target.Title != "" && !strings.Contains(target.Title, "[AGYS_INTERNAL_") && (sessionState != nil && sessionState.ConversationTitle != "") {
 				title = target.Title
 			} else {
-				title = formatAgysDefaultTitle(profileName)
+				title = formatAgysDefaultTitle(displayProfile)
 			}
 		} else if title == "" {
-			title = formatAgysDefaultTitle(profileName)
+			title = formatAgysDefaultTitle(displayProfile)
 		}
 
 		title = sanitizeTerminalTitle(title)
 
+		targetProfile := profileName
+		if !isCurrentPane && target.Tokens != nil && target.Tokens["profile"] != "" {
+			targetProfile = target.Tokens["profile"]
+		}
 		tokens := map[string]string{
-			"profile": profileName,
+			"profile": targetProfile,
+		}
+		if (IsWorkbenchMode() || (target.Tokens != nil && target.Tokens["account"] != "")) && displayProfile != "" {
+			tokens["account"] = displayProfile
 		}
 		if targetModel != "" {
 			tokens["model"] = targetModel
@@ -1226,7 +1240,7 @@ func isPaneMetadataUnchanged(target HerdrPaneMatch, newDisplayAgent, newTitle st
 		}
 	}
 	for k, oldVal := range target.Tokens {
-		if (strings.HasPrefix(k, "quota_") || k == "profile" || k == "model" || k == "group" || k == "conversation_title" || k == "cost") && oldVal != "" {
+		if (strings.HasPrefix(k, "quota_") || k == "profile" || k == "account" || k == "model" || k == "group" || k == "conversation_title" || k == "cost") && oldVal != "" {
 			if newTokens[k] != oldVal {
 				return false
 			}

@@ -31,3 +31,12 @@ jobs:
           printf '%s  %s\n' 14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d "$fixture_herdr" | sha256sum -c -
           chmod 0755 "$fixture_herdr"
           HERDR_TEST_BIN="$fixture_herdr" python3 -B -m unittest discover -s tests
+  windows-desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Test and build desktop app
+        run: |
+          cargo test --locked --manifest-path desktop/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --manifest-path desktop/Cargo.toml

@@ -1885,3 +1885,109 @@ func TestReportHerdrQuotaOnly_UpdatesAllPanesOfProfile(t *testing.T) {
 		}
 	}
 }
+
+func TestReportHerdrMetadata_UsesWorkbenchLogicalAccountAndBroadcastsByAccount(t *testing.T) {
+	sockPath := fmt.Sprintf("/tmp/herdr_wb_account_%d.sock", time.Now().UnixNano())
+	_ = os.Remove(sockPath)
+	defer os.Remove(sockPath)
+
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Failed to create mock unix listener: %v", err)
+	}
+	defer listener.Close()
+
+	updatedPanes := make(chan string, 10)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 4096)
+			n, _ := conn.Read(buf)
+			reqStr := string(buf[:n])
+			_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+			if strings.Contains(reqStr, "pane.list") {
+				resp := `{"id":"agys:panes:1","result":{"panes":[{"pane_id":"w1:p1","agent":"Antigravity","display_agent":"acc-a","title":"agys: acc-a","tokens":{"profile":"mac-slot1","account":"acc-a","model":"gemini-2.5-flash","quota_5h_normal":"100%"}},{"pane_id":"w1:p2","agent":"Antigravity","display_agent":"acc-a","title":"agys: Task B","tokens":{"profile":"acc-a","account":"acc-a","model":"gemini-2.5-flash","conversation_title":"Task B","quota_5h_normal":"100%"}}]}}`
+				_, _ = conn.Write([]byte(resp + "\n"))
+			} else {
+				_, _ = conn.Write([]byte(`{"id":"agys:metadata:1","result":"ok"}` + "\n"))
+				if strings.Contains(reqStr, "pane.report_metadata") {
+					updatedPanes <- reqStr
+				}
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("AGYS_REAL_HOME", tempHome)
+	t.Setenv("AGYS_DIR", filepath.Join(tempHome, ".agys"))
+	t.Setenv("MULTI_AGENT_CLI", "1")
+	t.Setenv("MULTI_AGENT_CLI_ACCOUNT", "acc-a")
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_SOCKET_PATH", sockPath)
+
+	if _, err := Create("mac-slot1"); err != nil {
+		t.Fatalf("Create profile error: %v", err)
+	}
+	summary := &QuotaSummary{
+		Groups: []QuotaGroup{
+			{
+				DisplayName: "Gemini Models",
+				Buckets: []QuotaBucket{
+					{BucketID: "gemini-5h", Window: "5h", RemainingFraction: 0.90},
+					{BucketID: "gemini-weekly", Window: "weekly", RemainingFraction: 0.80},
+				},
+			},
+		},
+	}
+	if err := SaveCachedQuota("mac-slot1", summary); err != nil {
+		t.Fatalf("SaveCachedQuota error: %v", err)
+	}
+
+	if err := ReportHerdrMetadataWithModel(context.Background(), "mac-slot1", "gemini-2.5-flash"); err != nil {
+		t.Fatalf("ReportHerdrMetadataWithModel error: %v", err)
+	}
+
+	select {
+	case payload := <-updatedPanes:
+		if !strings.Contains(payload, `"display_agent":"acc-a"`) {
+			t.Errorf("Expected display_agent acc-a, got: %s", payload)
+		}
+		if !strings.Contains(payload, `"account":"acc-a"`) || !strings.Contains(payload, `"profile":"mac-slot1"`) {
+			t.Errorf("Expected account=acc-a and profile=mac-slot1, got: %s", payload)
+		}
+		if !strings.Contains(payload, `"title":"agys: acc-a"`) {
+			t.Errorf("Expected title agys: acc-a, got: %s", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Timeout waiting for metadata update")
+	}
+
+	if err := ReportHerdrQuotaOnly(context.Background(), "mac-slot1", "gemini-2.5-flash"); err != nil {
+		t.Fatalf("ReportHerdrQuotaOnly error: %v", err)
+	}
+	received := make(map[string]string)
+	for i := 0; i < 2; i++ {
+		select {
+		case payload := <-updatedPanes:
+			if strings.Contains(payload, `"pane_id":"w1:p1"`) {
+				received["w1:p1"] = payload
+			} else if strings.Contains(payload, `"pane_id":"w1:p2"`) {
+				received["w1:p2"] = payload
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Timeout waiting for quota broadcast; got %v", received)
+		}
+	}
+	if !strings.Contains(received["w1:p2"], `"profile":"acc-a"`) || !strings.Contains(received["w1:p2"], `"account":"acc-a"`) {
+		t.Errorf("Sibling pane w1:p2 lost its profile/account tokens: %s", received["w1:p2"])
+	}
+	if !strings.Contains(received["w1:p2"], `"title":"agys: Task B"`) {
+		t.Errorf("Sibling pane w1:p2 lost its title: %s", received["w1:p2"])
+	}
+}

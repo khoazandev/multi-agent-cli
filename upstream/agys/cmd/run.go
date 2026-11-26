@@ -207,6 +207,9 @@ func runWithProfileAndDir(cmd *cobra.Command, profileName string, agyArgs []stri
 
 	// Merge trusted workspaces across all profiles prior to execution
 	_ = profile.SyncTrustedWorkspaces()
+	if profile.IsWorkbenchMode() {
+		_ = profile.EnsureWorkbenchTrustedWorkspaces(profileDir, workingDir, agyArgs)
+	}
 
 	// Resolve active model following priority: explicit CLI flag > .active_model cache > settings.json > default Gemini (gemini-3.8-flash)
 	activeModel := profile.ResolveActiveModel(profileDir, explicitModel)
@@ -225,6 +228,7 @@ func runWithProfileAndDir(cmd *cobra.Command, profileName string, agyArgs []stri
 
 	// Apply default model and effort to agyArgs using resolved activeModel
 	agyArgs = EnsureDefaultModelAndEffortWithModel(agyArgs, activeModel)
+	agyArgs = EnsureWorkbenchPermissions(agyArgs)
 
 	// Persist active reasoning effort to profile cache
 	activeEffort := ""
@@ -314,6 +318,12 @@ func runWithProfileAndDir(cmd *cobra.Command, profileName string, agyArgs []stri
 
 	// Persist any token created in macOS Keychain during execution (e.g. login) to profile disk storage
 	profile.SyncKeychainTokenToDisk(profileDir, expectedRefreshToken)
+	primaryToken := filepath.Join(profileDir, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	if _, statErr := os.Stat(primaryToken); os.IsNotExist(statErr) && expectedRefreshToken != "" {
+		profile.ClearAllTokenLocations(profileDir)
+	} else if statErr == nil {
+		_ = profile.SyncAllTokenLocations(profileDir)
+	}
 
 	if profile.IsWorkbenchMode() {
 		if runErr == nil && isInteractiveSession(originalUserArgs) {
@@ -606,6 +616,36 @@ func EnsureDefaultModelAndEffortWithModel(args []string, defaultModel string) []
 	}
 
 	return finalArgs
+}
+
+// EnsureWorkbenchPermissions enables Always Accept (--dangerously-skip-permissions)
+// by default for Multi Agent CLI sessions unless explicitly disabled or opted out.
+func EnsureWorkbenchPermissions(args []string) []string {
+	if !profile.IsWorkbenchMode() || os.Getenv("MULTI_AGENT_CLI_ASK_PERMISSIONS") == "1" || isAgySubcommandCall(args) {
+		return args
+	}
+	dashIdx := -1
+	for i, arg := range args {
+		if arg == "--" {
+			dashIdx = i
+			break
+		}
+		if arg == "-h" || arg == "--help" || arg == "-v" || arg == "--version" ||
+			arg == "--sandbox" || strings.HasPrefix(arg, "--sandbox=") ||
+			arg == "--dangerously-skip-permissions" || strings.HasPrefix(arg, "--dangerously-skip-permissions=") {
+			return args
+		}
+	}
+	if dashIdx >= 0 {
+		out := make([]string, 0, len(args)+1)
+		out = append(out, args[:dashIdx]...)
+		out = append(out, "--dangerously-skip-permissions")
+		out = append(out, args[dashIdx:]...)
+		return out
+	}
+	out := make([]string, len(args), len(args)+1)
+	copy(out, args)
+	return append(out, "--dangerously-skip-permissions")
 }
 
 func resolveResumeProfile(profileName string, agyArgs []string, workingDir ...string) (string, []string, error) {

@@ -7,12 +7,24 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
 // IsWorkbenchMode enables isolation rules for Multi Agent CLI.
 func IsWorkbenchMode() bool {
 	return os.Getenv("MULTI_AGENT_CLI") == "1"
+}
+
+// DisplayProfileName returns the user-facing logical account name in Multi Agent CLI
+// when MULTI_AGENT_CLI_ACCOUNT is set, falling back to profileName.
+func DisplayProfileName(profileName string) string {
+	if IsWorkbenchMode() {
+		if account := strings.TrimSpace(os.Getenv("MULTI_AGENT_CLI_ACCOUNT")); account != "" && ValidateName(account) == nil {
+			return account
+		}
+	}
+	return profileName
 }
 
 var workbenchCommandName = regexp.MustCompile(`^[A-Za-z0-9_.][A-Za-z0-9_.-]*$`)
@@ -103,4 +115,60 @@ func workbenchConversationFile(profileDir, id string) (time.Time, bool) {
 		}
 	}
 	return modified, !modified.IsZero()
+}
+
+// EnsureWorkbenchTrustedWorkspaces records the project directory and any --add-dir
+// folders in the profile's isolated CLI settings.json without merging across profiles.
+func EnsureWorkbenchTrustedWorkspaces(profileDir, workingDir string, agyArgs []string) error {
+	if !IsWorkbenchMode() || strings.TrimSpace(profileDir) == "" {
+		return nil
+	}
+	dir := strings.TrimSpace(workingDir)
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+
+	settingsPath := filepath.Join(profileDir, ".gemini", "antigravity-cli", "settings.json")
+	trustedMap := make(map[string]bool)
+	readSettingsWorkspaces(settingsPath, trustedMap)
+
+	recordPath := func(raw string) {
+		cleaned := filepath.Clean(strings.TrimSpace(raw))
+		if cleaned == "" || cleaned == "." {
+			return
+		}
+		trustedMap[cleaned] = true
+		if resolved, err := filepath.EvalSymlinks(cleaned); err == nil && resolved != "" {
+			trustedMap[filepath.Clean(resolved)] = true
+		}
+		if canonical, err := canonicalWorkbenchRepo(cleaned); err == nil && canonical != "" {
+			trustedMap[canonical] = true
+		}
+	}
+
+	recordPath(dir)
+	for i := 0; i < len(agyArgs); i++ {
+		arg := agyArgs[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "--add-dir" && i+1 < len(agyArgs) {
+			recordPath(agyArgs[i+1])
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--add-dir=") {
+			recordPath(strings.TrimPrefix(arg, "--add-dir="))
+		}
+	}
+
+	if len(trustedMap) == 0 {
+		return nil
+	}
+	allTrusted := make([]string, 0, len(trustedMap))
+	for p := range trustedMap {
+		allTrusted = append(allTrusted, p)
+	}
+	sort.Strings(allTrusted)
+	return updateSettingsTrustedWorkspaces(settingsPath, allTrusted)
 }

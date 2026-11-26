@@ -24,7 +24,7 @@ class WorkbenchIntegrationTests(unittest.TestCase):
         library.mkdir(parents=True)
         self.launcher = home / ".local" / "bin" / "agy-herdr-projects"
         self.launcher.parent.mkdir()
-        for file in ("agy-herdr-projects.py", "herdr_layout.py"):
+        for file in ("agy-herdr-projects.py", "herdr_layout.py", "desktop_api.py"):
             shutil.copy(repo / "scripts" / file, library)
         (library / "agy-herdr-projects.py").chmod(0o755)
         self.launcher.symlink_to(library / "agy-herdr-projects.py")
@@ -36,7 +36,7 @@ class WorkbenchIntegrationTests(unittest.TestCase):
             "import json, os, sys, time\n"
             f"with open({str(self.log)!r}, 'a') as out:\n"
             "    out.write(json.dumps([sys.argv[2], os.getcwd(), os.environ['MULTI_AGENT_CLI'],"
-            " os.environ['AGYS_DIR'], sys.argv[4:]]) + '\\n')\n"
+            " os.environ['AGYS_DIR'], sys.argv[4:], os.environ.get('MULTI_AGENT_CLI_ACCOUNT')]) + '\\n')\n"
             "time.sleep(180)\n"
         )
         fake_agys.chmod(0o755)
@@ -178,6 +178,115 @@ class WorkbenchIntegrationTests(unittest.TestCase):
         pane = next(item for item in panes if item["tab_id"] == manager["tab_id"])
         recorded = json.loads((self.config_path.parent / "manager-terminal.json").read_text())
         self.assertEqual(recorded, pane["terminal_id"])
+
+    def test_desktop_switch_requires_close_confirmation(self):
+        self.launch("--count", "2")
+        self.wait_for_launches(2)
+        command = [str(self.launcher), "desktop", "assign", "project-a", "acc-b"]
+        denied = subprocess.run(command, env=self.env, cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertEqual(denied.returncode, 1)
+        self.assertIn("Close the pane", denied.stderr)
+        self.assertEqual(len(self.wait_for_launches(2)), 2)
+
+        allowed = subprocess.run([*command, "--close"], env=self.env, cwd=self.root,
+                                 capture_output=True, text=True, timeout=30, check=True)
+        result = json.loads(allowed.stdout)
+        self.assertTrue(all(project["account"] == "acc-b" for project in result["projects"]))
+        launches = self.wait_for_launches(3)
+        self.assertEqual(launches[-1][1], launches[0][1] if launches[0][0] == "acc-a" else launches[1][1])
+        self.assertNotEqual(launches[-1][0], "acc-b")
+
+    def test_shared_directory_is_passed_to_each_agent(self):
+        shared = self.root / "shared work"
+        shared.mkdir()
+        self.launch("--share-dir", str(shared))
+        self.launch("--share-dir", str(shared))
+        self.assertFalse(self.log.exists())
+        self.launch("--count", "2")
+        for launch in self.wait_for_launches(2):
+            self.assertEqual(launch[4], ["--add-dir", str(shared)])
+
+    def test_close_open_and_remove_single_project_and_propagate_account_env(self):
+        self.launch("--count", "2")
+        self.wait_for_launches(2)
+        workspace = next(item["workspace_id"] for item in self.herdr("workspace", "list")["workspaces"]
+                         if item["label"] == "Antigravity Projects")
+
+        self.launch("--close", "project-a")
+        panes = self.herdr("pane", "list", "--workspace", workspace)["panes"]
+        self.assertEqual(len(panes), 1)
+        self.assertIn("[project:project-b]", panes[0]["label"])
+
+        self.launch("--open", "project-b")
+        panes = self.herdr("pane", "list", "--workspace", workspace)["panes"]
+        self.assertEqual(len(panes), 1)
+        self.assertEqual(len(self.wait_for_launches(2)), 2)
+
+        extra = self.root / "extra-repo"
+        extra.mkdir()
+        self.launch("--add", "extra", "--repo", str(extra), "--profile", "acc-b")
+        launches = self.wait_for_launches(3)
+        self.assertTrue(launches[-1][0].startswith("mac-"))
+        self.assertEqual(launches[-1][5], "acc-b")
+        panes = self.herdr("pane", "list", "--workspace", workspace)["panes"]
+        self.assertEqual(len(panes), 2)
+        self.assertFalse(any("[project:project-a]" in pane["label"] for pane in panes))
+
+        self.launch("--open", "project-a")
+        self.assertEqual(len(self.wait_for_launches(4)), 4)
+        panes = self.herdr("pane", "list", "--workspace", workspace)["panes"]
+        self.assertEqual(len(panes), 3)
+
+        app_dir = self.root / "account-state" / "profiles" / "acc-a" / ".gemini" / "antigravity-cli"
+        (app_dir / "brain" / "chat-one").mkdir(parents=True)
+        (app_dir / "history.jsonl").write_text(
+            json.dumps({"conversationId": "chat-one", "workspace": str(self.root / "user" / "projects" / "agy-a"), "display": "Resume target", "timestamp": 5000}) + "\n"
+        )
+        history_result = subprocess.run([str(self.launcher), "--history", "project-a"], env=self.env, cwd=self.root,
+                                        capture_output=True, text=True, timeout=15, check=True)
+        self.assertIn("chat-one", history_result.stdout)
+        self.assertIn("Resume target", history_result.stdout)
+
+        self.launch("--open", "project-a", "--conversation", "chat-one", "--close-current-pane")
+        launches = self.wait_for_launches(5)
+        self.assertEqual(launches[-1][0], "acc-a")
+        self.assertEqual(launches[-1][4], ["--conversation=chat-one"])
+
+        denied = self.launch("--remove", "extra", expected=1)
+        self.assertIn("Close the pane", denied.stderr)
+        self.launch("--close", "extra")
+        self.launch("--remove", "extra")
+        saved = json.loads((self.config_path.parent / "projects.json").read_text())
+        self.assertEqual([item["id"] for item in saved], ["project-a", "project-b"])
+
+        self.launch("--close", "project-a")
+        self.launch("--close", "project-b")
+        panes = self.herdr("pane", "list", "--workspace", workspace)["panes"]
+        self.assertEqual(len(panes), 1)
+        self.assertEqual(panes[0]["label"], "[Multi Agent CLI] Setup")
+
+    def test_stale_conversation_pointer_falls_back_to_fresh_session(self):
+        fake_agys = self.root / "user" / ".local" / "lib" / "multi-agent-cli" / "agys"
+        fake_agys.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys, time\n"
+            "if '--conversation=missing-id' in sys.argv:\n"
+            "    sys.exit(1)\n"
+            f"with open({str(self.log)!r}, 'a') as out:\n"
+            "    out.write(json.dumps([sys.argv[2], os.getcwd(), os.environ['MULTI_AGENT_CLI'],"
+            " os.environ['AGYS_DIR'], sys.argv[4:], os.environ.get('MULTI_AGENT_CLI_ACCOUNT')]) + '\\n')\n"
+            "time.sleep(180)\n"
+        )
+        fake_agys.chmod(0o755)
+        self.launch("--count", "1")
+        self.wait_for_launches(1)
+        pointer = self.config_path.parent / "conversations" / "project-a" / "acc-a"
+        pointer.write_text("missing-id\n")
+        self.stop()
+        self.launch("--count", "1")
+        launches = self.wait_for_launches(2)
+        self.assertEqual(launches[1][4], [])
+        self.assertFalse(pointer.exists())
 
 
 if __name__ == "__main__":

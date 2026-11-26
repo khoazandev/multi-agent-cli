@@ -1,5 +1,5 @@
-/install.sh text eol=lf
-/scripts/*.py text eol=lf
-/tests/*.py text eol=lf
-/.github/workflows/*.yml text eol=lf
-"/Open Workbench.cmd" text eol=crlf
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.png binary
+*.pb binary

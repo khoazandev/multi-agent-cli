@@ -408,7 +408,7 @@ func HandleStatusLine(ctx context.Context, stdin io.Reader, stdout, stderr io.Wr
 	// Format high-contrast real-time telemetry string for Antigravity CLI footer
 	useColor := os.Getenv("NO_COLOR") == ""
 	ctxPct := int(ctxUsedPct + 0.5)
-	statusLineStr := FormatStatusLineText(currentProfile, activeModel, effortVal, costVal, ctxPct, hasCtx, quotaDetails, useColor)
+	statusLineStr := FormatStatusLineText(DisplayProfileName(currentProfile), activeModel, effortVal, costVal, ctxPct, hasCtx, quotaDetails, useColor)
 
 	if stdout != nil && statusLineStr != "" {
 		fmt.Fprintln(stdout, statusLineStr)

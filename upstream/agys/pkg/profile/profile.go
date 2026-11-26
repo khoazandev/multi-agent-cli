@@ -652,6 +652,17 @@ func SyncAllTokenLocations(profileDir string) error {
 	return WriteTokenToProfile(profileDir, string(data))
 }
 
+// ClearAllTokenLocations removes all synced token files and cached email for a profile after logout.
+func ClearAllTokenLocations(profileDir string) {
+	if profileDir == "" {
+		return
+	}
+	for _, p := range GetTokenFilePaths(profileDir) {
+		_ = os.Remove(p)
+	}
+	_ = os.Remove(filepath.Join(profileDir, emailFilename))
+}
+
 // ClearKeychainToken removes the cached generic password item from macOS Keychain.
 // This forces `agy` to load the profile-isolated token file from disk instead of using a stale token from another profile.
 func ClearKeychainToken() {

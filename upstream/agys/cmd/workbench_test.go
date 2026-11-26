@@ -102,3 +102,140 @@ func TestWorkbenchResumeIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestDisplayProfileNameAndTokenCleanup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AGYS_REAL_HOME", home)
+	t.Setenv("AGYS_DIR", filepath.Join(home, ".agys"))
+	t.Setenv("MULTI_AGENT_CLI", "1")
+	t.Setenv("MULTI_AGENT_CLI_ACCOUNT", "acc-a")
+
+	if got := profile.DisplayProfileName("mac-1234"); got != "acc-a" {
+		t.Fatalf("DisplayProfileName = %q, want acc-a", got)
+	}
+	t.Setenv("MULTI_AGENT_CLI_ACCOUNT", "invalid/name")
+	if got := profile.DisplayProfileName("mac-1234"); got != "mac-1234" {
+		t.Fatalf("DisplayProfileName with invalid account = %q, want mac-1234", got)
+	}
+
+	profileDir, err := profile.GetProfileDir("acc-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := profile.WriteTokenToProfile(profileDir, `{"token":{"refresh_token":"tok"}}`); err != nil {
+		t.Fatal(err)
+	}
+	if !profile.HasProfileToken("acc-a") {
+		t.Fatalf("expected token files to be written")
+	}
+	profile.ClearAllTokenLocations(profileDir)
+	if profile.HasProfileToken("acc-a") {
+		t.Fatalf("expected ClearAllTokenLocations to remove all token copies")
+	}
+}
+
+func TestWorkbenchAlwaysAcceptAndTrustedWorkspaces(t *testing.T) {
+	t.Setenv("MULTI_AGENT_CLI", "1")
+	t.Setenv("MULTI_AGENT_CLI_ASK_PERMISSIONS", "")
+
+	if got := EnsureWorkbenchPermissions(nil); !reflect.DeepEqual(got, []string{"--dangerously-skip-permissions"}) {
+		t.Fatalf("EnsureWorkbenchPermissions(nil) = %v", got)
+	}
+	if got := EnsureWorkbenchPermissions([]string{"--conversation=owned"}); !reflect.DeepEqual(got, []string{"--conversation=owned", "--dangerously-skip-permissions"}) {
+		t.Fatalf("EnsureWorkbenchPermissions(conversation) = %v", got)
+	}
+	if got := EnsureWorkbenchPermissions([]string{"--", "fix", "bug"}); !reflect.DeepEqual(got, []string{"--dangerously-skip-permissions", "--", "fix", "bug"}) {
+		t.Fatalf("EnsureWorkbenchPermissions(prompt) = %v", got)
+	}
+
+	unchangedCases := [][]string{
+		{"models"},
+		{"--version"},
+		{"--sandbox"},
+		{"--dangerously-skip-permissions", "--model", "gemini-3.8-flash"},
+	}
+	for _, tc := range unchangedCases {
+		if got := EnsureWorkbenchPermissions(tc); !reflect.DeepEqual(got, tc) {
+			t.Fatalf("EnsureWorkbenchPermissions(%v) = %v, want unchanged", tc, got)
+		}
+	}
+
+	t.Setenv("MULTI_AGENT_CLI_ASK_PERMISSIONS", "1")
+	if got := EnsureWorkbenchPermissions([]string{"--conversation=owned"}); !reflect.DeepEqual(got, []string{"--conversation=owned"}) {
+		t.Fatalf("EnsureWorkbenchPermissions with ask override = %v", got)
+	}
+	t.Setenv("MULTI_AGENT_CLI_ASK_PERMISSIONS", "")
+	t.Setenv("MULTI_AGENT_CLI", "")
+	if got := EnsureWorkbenchPermissions([]string{"--conversation=owned"}); !reflect.DeepEqual(got, []string{"--conversation=owned"}) {
+		t.Fatalf("EnsureWorkbenchPermissions outside workbench = %v", got)
+	}
+
+	home := t.TempDir()
+	t.Setenv("MULTI_AGENT_CLI", "1")
+	t.Setenv("HOME", home)
+	t.Setenv("AGYS_REAL_HOME", home)
+	t.Setenv("AGYS_DIR", filepath.Join(home, ".agys"))
+
+	repoRoot := filepath.Join(home, "work", "repo")
+	repoSubdir := filepath.Join(repoRoot, "sub", "pkg")
+	sharedA := filepath.Join(home, "shared-a")
+	sharedB := filepath.Join(home, "shared-b")
+	for _, dir := range []string{filepath.Join(repoRoot, ".git"), repoSubdir, sharedA, sharedB} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	profileDir, err := profile.Create("acc-trust")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProfileDir, err := profile.Create("acc-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSettings := filepath.Join(otherProfileDir, ".gemini", "antigravity-cli", "settings.json")
+
+	settingsPath := filepath.Join(profileDir, ".gemini", "antigravity-cli", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{\"customKey\": \"keep\"}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := profile.EnsureWorkbenchTrustedWorkspaces(profileDir, repoSubdir, []string{"--add-dir", sharedA, "--add-dir=" + sharedB}); err != nil {
+		t.Fatalf("EnsureWorkbenchTrustedWorkspaces failed: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["customKey"] != "keep" {
+		t.Fatalf("expected existing settings key preserved, got %#v", parsed["customKey"])
+	}
+	rawTrusted, ok := parsed["trustedWorkspaces"].([]any)
+	if !ok {
+		t.Fatalf("expected trustedWorkspaces slice, got %T", parsed["trustedWorkspaces"])
+	}
+	trustedSet := make(map[string]bool)
+	for _, item := range rawTrusted {
+		if s, isStr := item.(string); isStr {
+			trustedSet[s] = true
+		}
+	}
+	for _, want := range []string{repoRoot, repoSubdir, sharedA, sharedB} {
+		if !trustedSet[want] {
+			t.Fatalf("expected %q in trustedWorkspaces, got %v", want, rawTrusted)
+		}
+	}
+	if _, err := os.Stat(otherSettings); !os.IsNotExist(err) {
+		t.Fatalf("expected other profile settings.json untouched, got err=%v", err)
+	}
+}

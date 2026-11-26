@@ -27,11 +27,22 @@ def create_project_tab(socket_path, workspace_id, tab_label, panes):
             right = _split("down", right, leaves[2])
         root = _split("right", left, right)
 
-    request = {
-        "id": "multi-agent-cli:layout-apply",
-        "method": "layout.apply",
-        "params": {"workspace_id": workspace_id, "tab_label": tab_label, "root": root},
-    }
+    result = _rpc(
+        socket_path,
+        "multi-agent-cli:layout-apply",
+        "layout.apply",
+        {"workspace_id": workspace_id, "tab_label": tab_label, "root": root},
+    )
+    return result
+
+
+def focus_pane(socket_path, pane_id):
+    """Focus a specific pane by ID via Herdr's UNIX socket JSON-RPC."""
+    return _rpc(socket_path, "multi-agent-cli:pane-focus", "pane.focus", {"pane_id": pane_id})
+
+
+def _rpc(socket_path, request_id, method, params):
+    request = {"id": request_id, "method": method, "params": params}
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(15)
         connection.connect(str(socket_path))
@@ -39,11 +50,11 @@ def create_project_tab(socket_path, workspace_id, tab_label, panes):
         with connection.makefile("rb") as stream:
             line = stream.readline()
     if not line:
-        raise RuntimeError("Herdr closed the connection during layout.apply")
+        raise RuntimeError(f"Herdr closed the connection during {method}")
     response = json.loads(line)
     if "error" in response:
         error = response["error"]
-        raise RuntimeError(f"Herdr layout.apply failed ({error['code']}): {error['message']}")
+        raise RuntimeError(f"Herdr {method} failed ({error['code']}): {error['message']}")
     return response["result"]
 
 
