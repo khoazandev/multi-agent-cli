@@ -133,9 +133,15 @@ func EnsureWorkbenchTrustedWorkspaces(profileDir, workingDir string, agyArgs []s
 	readSettingsWorkspaces(settingsPath, trustedMap)
 
 	recordPath := func(raw string) {
-		cleaned := filepath.Clean(strings.TrimSpace(raw))
-		if cleaned == "" || cleaned == "." {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || raw == "." {
 			return
+		}
+		cleaned := filepath.Clean(raw)
+		if !filepath.IsAbs(cleaned) {
+			if abs, err := filepath.Abs(cleaned); err == nil {
+				cleaned = abs
+			}
 		}
 		trustedMap[cleaned] = true
 		if resolved, err := filepath.EvalSymlinks(cleaned); err == nil && resolved != "" {

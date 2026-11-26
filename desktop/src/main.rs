@@ -129,6 +129,15 @@ impl Desktop {
                     Ok(snapshot) => {
                         self.data = snapshot;
                         self.loaded = true;
+                        if let Some(selected) = &self.selected
+                            && !self
+                                .data
+                                .accounts
+                                .iter()
+                                .any(|account| &account.name == selected)
+                        {
+                            self.selected = None;
+                        }
                     }
                     Err(error) => self.error = Some(error),
                 }

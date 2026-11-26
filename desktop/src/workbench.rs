@@ -343,7 +343,10 @@ fn focus_terminal_window(allow_any_wt: bool) -> bool {
             }
             let search = &mut *(context as *mut Search);
             let window_title = String::from_utf16_lossy(&title[..title_len.max(0) as usize]);
-            if window_title.contains("Multi Agent CLI") || window_title.contains("Antigravity Projects")
+            let lower_title = window_title.to_ascii_lowercase();
+            if window_title.contains("Multi Agent CLI")
+                || window_title.contains("Antigravity Projects")
+                || lower_title.contains("herdr")
             {
                 search.preferred = hwnd;
                 return 0;

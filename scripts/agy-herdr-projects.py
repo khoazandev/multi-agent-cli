@@ -30,7 +30,7 @@ manager_label = "Accounts & Projects"
 panes_per_tab = 4
 identifier = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}")
 marker = re.compile(r" \[project:([a-zA-Z0-9_-]+)\]$")
-conversation_id = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}")
+conversation_id = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}")
 credential_paths = (
     ".gemini/antigravity-cli/antigravity-oauth-token",
     ".gemini/antigravity/antigravity-oauth-token",
@@ -444,20 +444,56 @@ def client_lock_path():
     return state_dir / "client.lock"
 
 
-def is_client_attached():
-    path = client_lock_path()
-    if not path.exists():
-        return False
+_herdr_non_client_subcommands = frozenset({
+    "server", "status", "pane", "tab", "workspace", "layout",
+    "session", "config", "plugin", "doctor", "help", "version",
+    "--version", "-V", "--help", "-h", "--skill",
+})
+
+
+def _has_herdr_client_process(target_socket, proc_root=Path("/proc")):
+    uid = os.getuid()
     try:
-        with path.open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True
-            fcntl.flock(lock, fcntl.LOCK_UN)
-            return False
+        entries = list(proc_root.iterdir())
     except OSError:
         return False
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            cmdline = (entry / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
+            if not cmdline or Path(os.fsdecode(cmdline[0])).name != "herdr":
+                continue
+            tokens = [os.fsdecode(part) for part in cmdline[1:] if part]
+            if any(token in _herdr_non_client_subcommands for token in tokens):
+                continue
+            environ = (entry / "environ").read_bytes().split(b"\0")
+            if target_socket in environ:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def is_client_attached():
+    path = client_lock_path()
+    if path.exists():
+        try:
+            with path.open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    try:
+        target_socket = f"HERDR_SOCKET_PATH={runtime_socket()}".encode("utf-8")
+    except OSError:
+        return False
+    return _has_herdr_client_process(target_socket)
 
 
 def attach_herdr_client(env):
@@ -483,13 +519,31 @@ def focus_project_pane(env, workspace_id, pane):
     focus_pane(env["HERDR_SOCKET_PATH"], pane["pane_id"])
 
 
-def close_project_pane(env, workspace_id, pane_id):
+def wait_for_project_unlock(project_id, timeout=5.0):
+    lock_path = state_dir / "profiles" / f"{project_id}.lock"
+    if not lock_path.exists():
+        return
+    deadline = time.monotonic() + timeout
+    with lock_path.open("a") as lock:
+        while time.monotonic() < deadline:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                time.sleep(0.05)
+                continue
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            return
+
+
+def close_project_pane(env, workspace_id, pane_id, project_id=None):
     panes = herdr(env, "pane", "list", "--workspace", workspace_id)["panes"]
     if len(panes) <= 1 and any(pane["pane_id"] == pane_id for pane in panes):
         created = herdr(env, "tab", "create", "--workspace", workspace_id,
                         "--cwd", str(linux_home), "--label", starter_label, "--no-focus")
         herdr(env, "pane", "rename", created["root_pane"]["pane_id"], starter_label)
     herdr(env, "pane", "close", pane_id)
+    if project_id:
+        wait_for_project_unlock(project_id)
 
 
 def sync_panes(env, projects, starting, fresh, target_ids=None):
@@ -633,13 +687,10 @@ def list_project_conversations(project, account, root, limit=20):
                 if timestamp > existing["timestamp"]:
                     existing["timestamp"] = float(timestamp)
 
-    if current_id and current_id not in history_entries:
-        history_entries[current_id] = {"workspace": "", "title": "", "timestamp": 0.0}
-
     results = []
     for conv_id, info in history_entries.items():
         workspace = info["workspace"]
-        if workspace and repo_root(Path(workspace)) != expected_root:
+        if not workspace or repo_root(Path(workspace)) != expected_root:
             continue
         mtime = info["timestamp"] / 1000.0 if info["timestamp"] > 0 else 0.0
         artifact = None
@@ -680,6 +731,8 @@ def list_project_conversations(project, account, root, limit=20):
 
 
 def has_resumable_conversation(profile_root, profile, conv_id, project_repo):
+    if not conversation_id.fullmatch(conv_id):
+        return False
     profiles_dir = profile_root / "profiles" / profile
     has_files = False
     for app in ("antigravity-cli", "antigravity"):
@@ -702,7 +755,7 @@ def has_resumable_conversation(profile_root, profile, conv_id, project_repo):
                 if entry.get("conversationId") != conv_id:
                     continue
                 workspace = entry.get("workspace")
-                if not workspace or repo_root(Path(workspace)) == expected_root:
+                if workspace and repo_root(Path(workspace)) == expected_root:
                     return True
         except (OSError, ValueError):
             continue
@@ -750,10 +803,14 @@ def run_profile(profile, args):
     resuming_saved = bool(resume_flag and resume_flag in args)
 
     with (lock_dir / f"{project.id}.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RuntimeError(f"Project {project.id!r} is already running in the workbench") from error
+        for attempt in range(30):
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if attempt == 29:
+                    raise RuntimeError(f"Project {project.id!r} is already running in the workbench") from error
+                time.sleep(0.1)
         reuse_account_login(project, account, projects, profile_root)
         os.set_inheritable(lock.fileno(), True)
         if resuming_saved:
@@ -825,13 +882,28 @@ def manage_projects():
     launcher = str(bin_dir / "agy-herdr-projects")
     while True:
         projects = load_projects()
+        running_ids = None
+        try:
+            env = server_environment()
+            if herdr(env, "status", "server", "--json").get("running"):
+                workspace_id = find_workspace(env)
+                if workspace_id:
+                    panes = herdr(env, "pane", "list", "--workspace", workspace_id)["panes"]
+                    running_ids = set(match_panes(projects, panes, pane_bindings()))
+                else:
+                    running_ids = set()
+        except (RuntimeError, OSError, subprocess.SubprocessError, KeyError, TypeError, ValueError):
+            running_ids = None
         print("\nMulti Agent CLI · Tài khoản và dự án")
         for account in sorted({account for project in projects for account in project.profiles}):
             print(f"\n{account}")
             for project in projects:
                 if account in project.profiles:
                     active = " · đang chọn" if project.profile == account else ""
-                    state = "" if project.enabled else " · đang đóng"
+                    if running_ids is not None:
+                        state = " · đang chạy" if project.id in running_ids else " · đang đóng"
+                    else:
+                        state = "" if project.enabled else " · đang đóng"
                     print(f"  {project.id}  {project.name}{active}{state}\n    {project.repo}")
         print("\n1  Thêm repo    2  Gán tài khoản    3  Đổi tài khoản    4  Mở pane    5  Đóng pane    6  Gỡ dự án    7  Lịch sử chat    q  Đóng tab")
         choice = input("> ").strip().lower()
@@ -1018,7 +1090,7 @@ def main():
                     panes = herdr(env, "pane", "list", "--workspace", workspace_id)["panes"]
                     pane = match_panes(projects, panes, pane_bindings()).get(args.close)
                     if pane:
-                        close_project_pane(env, workspace_id, pane["pane_id"])
+                        close_project_pane(env, workspace_id, pane["pane_id"], project_id=args.close)
                     final = match_panes(projects, herdr(env, "pane", "list", "--workspace", workspace_id)["panes"], pane_bindings())
                     write_json(state_dir / "panes.json", {p: item["terminal_id"] for p, item in final.items()})
             return
@@ -1038,7 +1110,7 @@ def main():
                     if pane:
                         if not args.close_current_pane:
                             raise ValueError(f"Close the pane for {project.name} before removing it")
-                        close_project_pane(env, workspace_id, pane["pane_id"])
+                        close_project_pane(env, workspace_id, pane["pane_id"], project_id=args.remove)
             projects = [item for item in projects if item.id != args.remove]
             validate_projects(projects)
             save_projects(projects)
@@ -1115,7 +1187,7 @@ def main():
                         if pane:
                             if not args.close_current_pane:
                                 raise ValueError(f"Close the pane for {project.name} before switching its account")
-                            pane_to_close = pane["pane_id"]
+                            pane_to_close = (pane["pane_id"], project_id)
                 profiles = (profile, *(existing for existing in project.profiles if existing != profile))
                 projects = [replace(item, profiles=profiles, enabled=True) if item.id == project_id else item for item in projects]
                 target_ids = {project_id}
@@ -1141,9 +1213,9 @@ def main():
                         if existing_pane:
                             if not args.close_current_pane:
                                 raise ValueError(f"Close the pane for {open_project.name} before switching its conversation")
-                            close_project_pane(env, workspace_id, existing_pane["pane_id"])
+                            close_project_pane(env, workspace_id, existing_pane["pane_id"], project_id=args.open)
             if pane_to_close:
-                close_project_pane(env, workspace_id, pane_to_close)
+                close_project_pane(env, workspace_id, pane_to_close[0], project_id=pane_to_close[1])
             save_projects(projects)
             profiles_root = state_dir / "profiles-root.json"
             if not profiles_root.exists():

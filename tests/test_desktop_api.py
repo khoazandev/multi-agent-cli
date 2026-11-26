@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -36,10 +37,18 @@ class DesktopApiTests(unittest.TestCase):
             self.assertNotIn("private-test-value", json.dumps(result))
 
     def test_converts_wsl_paths_delivered_by_explorer(self):
-        self.assertEqual(convert_repo(r"\\wsl.localhost\Ubuntu\home\someone\my repo"),
-                         Path("/home/someone/my repo"))
-        with self.assertRaises(ValueError):
-            convert_repo(r"\\wsl.localhost\Debian\home\someone\my repo")
+        with patch.dict(os.environ, {"WSL_DISTRO_NAME": ""}, clear=False):
+            self.assertEqual(convert_repo(r"\\wsl.localhost\Ubuntu\home\someone\my repo"),
+                             Path("/home/someone/my repo"))
+            self.assertEqual(convert_repo(r"\\wsl.localhost\Ubuntu-24.04\home\someone\my repo"),
+                             Path("/home/someone/my repo"))
+            with self.assertRaises(ValueError):
+                convert_repo(r"\\wsl.localhost\Debian\home\someone\my repo")
+        with patch.dict(os.environ, {"WSL_DISTRO_NAME": "Ubuntu-24.04"}, clear=False):
+            self.assertEqual(convert_repo(r"\\wsl.localhost\Ubuntu-24.04\home\someone\my repo"),
+                             Path("/home/someone/my repo"))
+            with self.assertRaises(ValueError):
+                convert_repo(r"\\wsl.localhost\Ubuntu\home\someone\my repo")
 
     def test_validate_account_and_assign_new_account(self):
         with tempfile.TemporaryDirectory() as folder:

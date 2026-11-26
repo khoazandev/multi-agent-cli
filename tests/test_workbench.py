@@ -144,32 +144,40 @@ class WorkbenchTests(unittest.TestCase):
         self.assertFalse(workbench.reuse_account_login(target, source.profile, [source, target], self.profiles))
         self.assertIn("own-login", destination.read_text())
 
-    def test_list_project_conversations_filters_by_repo_and_extracts_title(self):
+    def test_proc_client_detection_and_strict_resumable_workspace(self):
+        proc_root = self.root / "proc"
+        uid = os.getuid()
+        target_socket = b"HERDR_SOCKET_PATH=/run/test/h.sock"
+
+        def add_proc(pid, cmdline, environ):
+            entry = proc_root / pid
+            entry.mkdir(parents=True)
+            (entry / "cmdline").write_bytes(b"\0".join(cmdline) + b"\0")
+            (entry / "environ").write_bytes(b"\0".join(environ) + b"\0")
+
+        with patch.object(workbench.os, "getuid", return_value=uid):
+            add_proc("100", [b"/opt/bin/herdr", b"server"], [target_socket])
+            add_proc("101", [b"/opt/bin/herdr", b"--session", b"other"], [b"HERDR_SOCKET_PATH=/run/other/h.sock"])
+            add_proc("102", [b"/opt/bin/herdr", b"status", b"client"], [target_socket])
+            self.assertFalse(workbench._has_herdr_client_process(target_socket, proc_root=proc_root))
+            add_proc("103", [b"/home/agycli/.local/lib/multi-agent-cli/herdr"], [b"FOO=1", target_socket])
+            self.assertTrue(workbench._has_herdr_client_process(target_socket, proc_root=proc_root))
+
         project = workbench.project_for(1)
         project.repo.mkdir(parents=True)
         other_repo = self.root / "other-repo"
         other_repo.mkdir()
         app_dir = self.profiles / "profiles" / project.profile / ".gemini" / "antigravity-cli"
-        app_dir.mkdir(parents=True)
-        for cid in ("conv-old", "conv-new", "conv-other"):
-            transcript = app_dir / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
-            transcript.parent.mkdir(parents=True)
-            transcript.write_text('{"type":"USER_INPUT","content":"<USER_REQUEST>\\nFix login flow\\n</USER_REQUEST>"}\n')
+        for cid in ("conv-empty", "conv-other", "conv-match"):
+            (app_dir / "brain" / cid).mkdir(parents=True)
         (app_dir / "history.jsonl").write_text(
-            json.dumps({"conversationId": "conv-old", "workspace": str(project.repo), "display": "Initial chat", "timestamp": 1000}) + "\n"
-            + json.dumps({"conversationId": "conv-new", "workspace": str(project.repo), "display": "", "timestamp": 2000}) + "\n"
-            + json.dumps({"conversationId": "conv-other", "workspace": str(other_repo), "display": "Other repo", "timestamp": 3000}) + "\n"
+            json.dumps({"conversationId": "conv-empty", "workspace": "", "display": "Empty"}) + "\n"
+            + json.dumps({"conversationId": "conv-other", "workspace": str(other_repo), "display": "Other"}) + "\n"
+            + json.dumps({"conversationId": "conv-match", "workspace": str(project.repo), "display": "Match"}) + "\n"
         )
-        pointer = workbench.session_file(project, project.profile)
-        pointer.parent.mkdir(parents=True)
-        pointer.write_text("conv-old\n")
-
-        sessions = workbench.list_project_conversations(project, project.profile, self.profiles)
-        self.assertEqual([item["id"] for item in sessions], ["conv-new", "conv-old"])
-        self.assertEqual(sessions[0]["title"], "Fix login flow")
-        self.assertFalse(sessions[0]["current"])
-        self.assertEqual(sessions[1]["title"], "Initial chat")
-        self.assertTrue(sessions[1]["current"])
+        self.assertFalse(workbench.has_resumable_conversation(self.profiles, project.profile, "conv-empty", project.repo))
+        self.assertFalse(workbench.has_resumable_conversation(self.profiles, project.profile, "conv-other", project.repo))
+        self.assertTrue(workbench.has_resumable_conversation(self.profiles, project.profile, "conv-match", project.repo))
 
 
 if __name__ == "__main__":

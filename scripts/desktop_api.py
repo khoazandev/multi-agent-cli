@@ -1,6 +1,7 @@
 """Local JSON interface for the Rust desktop manager."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -14,7 +15,10 @@ def convert_repo(value):
         path = path[4:]
     if path.startswith("//"):
         parts = path[2:].split("/", 2)
-        if len(parts) != 3 or parts[0].lower() not in ("wsl.localhost", "wsl$") or parts[1].lower() != "ubuntu":
+        allowed_distro = (os.environ.get("WSL_DISTRO_NAME") or "").strip().lower()
+        distro = parts[1].lower() if len(parts) >= 2 else ""
+        is_allowed = (distro == allowed_distro) if allowed_distro else distro.startswith("ubuntu")
+        if len(parts) != 3 or parts[0].lower() not in ("wsl.localhost", "wsl$") or not is_allowed:
             raise ValueError("Chọn thư mục Windows hoặc thư mục thuộc Ubuntu WSL.")
         path = "/" + parts[2]
     elif re.match(r"^[a-zA-Z]:/", path):
